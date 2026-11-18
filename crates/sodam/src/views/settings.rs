@@ -36,7 +36,7 @@ pub(crate) fn duration_of(seconds: i64) -> String {
 }
 
 /// 音效滑杆轨道宽度与滑块直径（设置页用）。
-const EQ_TRACK_W: f32 = 200.0;
+const EQ_TRACK_W: f32 = 150.0;
 const EQ_THUMB: f32 = 11.0;
 /// 滑杆槽位约定：0..10 = EQ 段（dB），10 = 前级（dB），11/12 = 混响强度/空间大小（%）。
 const PREAMP_SLOT: usize = 10;
@@ -124,27 +124,32 @@ fn effects_presets_card(root: &Root, cx: &mut Context<Root>) -> AnyElement {
         .into_any_element()
 }
 
-/// 均衡器卡片内容：前级 + 10 段双列。
+/// 均衡器卡片内容：前级 + 10 段频段，flex_wrap 自适应网格。
+/// 每个滑杆行自然宽 262px：内容区宽时两列（甚至更多）并排，
+/// 窗口窄时自动折成单列，绝不溢出卡片。
 fn effects_eq_card(root: &Root, cx: &mut Context<Root>) -> AnyElement {
-    // 频段双列排布：左列 32~500 Hz，右列 1K~16K，一行一对，节省纵向空间。
-    let mut band_rows: Vec<AnyElement> = Vec::new();
-    for row in 0..5 {
-        band_rows.push(
+    let cells: Vec<AnyElement> = std::iter::once(PREAMP_SLOT)
+        .chain(0..sodam_core::eq::BAND_COUNT)
+        .map(|slot| {
+            div()
+                .flex_none()
+                .child(eq_slider_row(root, slot, cx))
+                .into_any_element()
+        })
+        .collect();
+    settings_card(Some("均衡器"))
+        .child(
             div()
                 .flex()
-                .gap(px(theme::space::LG))
-                .child(eq_slider_row(root, row, cx))
-                .child(eq_slider_row(root, row + 5, cx))
-                .into_any_element(),
-        );
-    }
-    settings_card(Some("均衡器"))
-        .child(eq_slider_row(root, PREAMP_SLOT, cx))
-        .children(band_rows)
+                .flex_row()
+                .flex_wrap()
+                .gap(px(theme::space::MD))
+                .children(cells),
+        )
         .into_any_element()
 }
 
-/// 空间混响卡片内容：强度 + 空间大小。
+/// 空间混响卡片内容：强度 + 空间大小（宽屏并排，窄屏折行）。
 fn effects_reverb_card(root: &Root, cx: &mut Context<Root>) -> AnyElement {
     settings_card(Some("空间混响"))
         .child(
@@ -153,8 +158,23 @@ fn effects_reverb_card(root: &Root, cx: &mut Context<Root>) -> AnyElement {
                 .text_color(theme::text_faint())
                 .child(root.tr("混响强度为 0 时无混响；现场/古典等预设自带混响")),
         )
-        .child(eq_slider_row(root, REVERB_WET_SLOT, cx))
-        .child(eq_slider_row(root, REVERB_ROOM_SLOT, cx))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap(px(theme::space::MD))
+                .child(
+                    div()
+                        .flex_none()
+                        .child(eq_slider_row(root, REVERB_WET_SLOT, cx)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .child(eq_slider_row(root, REVERB_ROOM_SLOT, cx)),
+                ),
+        )
         .into_any_element()
 }
 
@@ -181,10 +201,11 @@ fn eq_slider_row(root: &Root, slot: usize, cx: &mut Context<Root>) -> AnyElement
     div()
         .flex()
         .items_center()
-        .gap(px(theme::space::MD))
+        .gap(px(theme::space::SM))
         .child(
             div()
-                .w(px(52.0))
+                .w(px(44.0))
+                .flex_none()
                 .text_size(theme::Text::Small.size())
                 .text_color(theme::text())
                 .child(label),
@@ -192,7 +213,8 @@ fn eq_slider_row(root: &Root, slot: usize, cx: &mut Context<Root>) -> AnyElement
         .child(eq_slider(root, slot, cx))
         .child(
             div()
-                .w(px(64.0))
+                .w(px(52.0))
+                .flex_none()
                 .text_size(theme::Text::Small.size())
                 .text_color(theme::text_muted())
                 .child(value_text),

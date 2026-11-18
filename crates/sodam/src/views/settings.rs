@@ -315,17 +315,14 @@ pub(crate) fn account_section(root: &Root, cx: &mut Context<Root>) -> AnyElement
         .filter(|url| !url.trim().is_empty())
         .and_then(|url| root.cover_of(&url));
 
+    // 通栏信息条：不带卡片外壳（无圆角/背景/描边），宽度由调用方撑满，
+    // 与设置页头同一行、与下方内容区左右对齐。
     div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(theme::space::LG))
-        .px(px(theme::space::LG))
         .py(px(theme::space::SM))
-        .rounded(px(theme::radius::CARD))
-        .bg(theme::surface_elevated())
-        .border_1()
-        .border_color(theme::border())
         .child(if logged_in {
             cover(avatar_path, 48.0, 999.0)
         } else {

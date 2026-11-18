@@ -1233,16 +1233,16 @@ pub fn render(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> impl 
                             .gap(px(theme::space::LG))
                             .child(
                                 div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
+                                    .w(px(230.0))
+                                    .flex_none()
                                     .h(px(64.0))
                                     .justify_center()
                                     .child(page_header(&title, &subtitle_for(root))),
                             )
                             .child(
                                 div()
-                                    .w(px(420.0))
-                                    .flex_none()
+                                    .flex_1()
+                                    .min_w(px(0.0))
                                     .child(settings::account_section(root, cx)),
                             ),
                     )

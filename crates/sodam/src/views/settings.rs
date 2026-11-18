@@ -338,18 +338,18 @@ pub(crate) fn account_section(root: &Root, cx: &mut Context<Root>) -> AnyElement
         .filter(|url| !url.trim().is_empty())
         .and_then(|url| root.cover_of(&url));
 
-    // 通栏信息条：不带卡片外壳（无圆角/背景/描边），宽度由调用方撑满，
-    // 与设置页头同一行、与下方内容区左右对齐。
+    // 侧栏底部账号条：不带卡片外壳。侧栏窄，昵称/ID 必须截断省略，
+    // 否则被挤成逐字竖排；头像与按钮取紧凑尺寸。
     div()
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(theme::space::LG))
+        .gap(px(theme::space::SM))
         .py(px(theme::space::SM))
         .child(if logged_in {
-            cover(avatar_path, 48.0, 999.0)
+            cover(avatar_path, 40.0, 999.0)
         } else {
-            cover(None, 48.0, 999.0)
+            cover(None, 40.0, 999.0)
         })
         .child(
             div()
@@ -360,6 +360,7 @@ pub(crate) fn account_section(root: &Root, cx: &mut Context<Root>) -> AnyElement
                 .gap(px(theme::space::XS))
                 .child(
                     div()
+                        .truncate()
                         .text_size(theme::Text::Small.size())
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme::text())
@@ -374,6 +375,7 @@ pub(crate) fn account_section(root: &Root, cx: &mut Context<Root>) -> AnyElement
                 )
                 .child(
                     div()
+                        .truncate()
                         .text_size(theme::Text::Small.size())
                         .text_color(theme::text_muted())
                         .child(if logged_in {
@@ -438,8 +440,8 @@ pub(crate) fn account_section(root: &Root, cx: &mut Context<Root>) -> AnyElement
                     .items_center()
                     .gap(px(theme::space::SM))
                     .flex_none()
-                    .h(px(theme::size::CONTROL))
-                    .px(px(theme::space::LG))
+                    .h(px(theme::size::CONTROL_SM))
+                    .px(px(theme::space::MD))
                     .rounded(px(theme::radius::PILL))
                     .bg(theme::surface_hover())
                     .cursor_pointer()

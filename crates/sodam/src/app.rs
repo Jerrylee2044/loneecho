@@ -520,6 +520,8 @@ pub struct Root {
     pub account: Option<AccountInfo>,
     /// 音频播放引擎（rodio，跑在专属线程上）
     pub engine: PlaybackEngine,
+    /// 设置页当前选中的二级分类（只随会话，不持久化）
+    pub settings_section: crate::views::settings::SettingsSection,
     /// 播放进度 / 时长上报（喂引擎快照，内部异步发请求）。
     pub play_reporter: PlayReporter,
 }
@@ -581,6 +583,7 @@ impl Root {
             } else {
                 Nav::Settings
             },
+            settings_section: Default::default(),
             nav_history: Vec::new(),
             lyrics_return_nav: if logged_in { Some(Nav::Home) } else { None },
             theme,

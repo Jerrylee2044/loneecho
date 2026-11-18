@@ -582,6 +582,12 @@ impl Language {
                 "Queue is empty. Search or open a playlist."
             }
             "LoneEcho" => "LoneEcho",
+            "账号信息" => "Account",
+            "签名服务、设备指纹与登录状态" => "Signer, device fingerprint and sign-in",
+            "管理账号、外观与播放" => "Manage account, appearance and playback",
+            "音效预设" => "Presets",
+            "均衡器" => "Equalizer",
+            "关于" => "About",
             "音效" => "Sound Effects",
             "正值增强、负值减弱；立即生效并随配置保存" => {
                 "Positive values boost, negative values cut. Applied instantly and saved."

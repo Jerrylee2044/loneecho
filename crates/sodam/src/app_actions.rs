@@ -590,6 +590,16 @@ impl Root {
         cx.notify();
     }
 
+    /// 切换设置页的二级分类。
+    pub fn set_settings_section(
+        &mut self,
+        section: crate::views::settings::SettingsSection,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings_section = section;
+        cx.notify();
+    }
+
     pub(crate) fn set_cache_limit_mb(&mut self, mb: u64, cx: &mut Context<Self>) {
         self.settings.audio_cache_limit_mb = mb.clamp(1024, 1024 * 1024);
         self.persist_playback_preferences();

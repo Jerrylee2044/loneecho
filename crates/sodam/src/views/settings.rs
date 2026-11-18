@@ -43,11 +43,9 @@ const PREAMP_SLOT: usize = 10;
 const REVERB_WET_SLOT: usize = 11;
 const REVERB_ROOM_SLOT: usize = 12;
 
-/// 设置页 → 音效：总开关 + 12 个预设 + 前级 + 10 段均衡器（双列）+ 空间混响。
-///
-/// 滑杆交互复用播放条音量条的「canvas 测轨道位置 + 点/拖换算」做法；
-/// 拖动即写配置，音频线程在下一帧边界应用，当前播放不中断。
-fn eq_section(root: &Root, cx: &mut Context<Root>) -> AnyElement {
+/// 音效页的三个卡片：预设（开关 + 12 预设）、均衡器（前级 + 10 段）、空间混响。
+/// 卡片标题与页面标题由页面层提供，这里只产出卡片内容。
+fn effects_presets_card(root: &Root, cx: &mut Context<Root>) -> AnyElement {
     let eq = root.settings.eq;
     let toggle_label = if eq.enabled {
         root.tr("关闭音效")
@@ -83,6 +81,51 @@ fn eq_section(root: &Root, cx: &mut Context<Root>) -> AnyElement {
         })
         .collect::<Vec<_>>();
 
+    let toggle = div()
+        .id("eq-toggle")
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .h(px(theme::size::CONTROL_SM))
+        .px(px(theme::space::MD))
+        .rounded(px(theme::radius::ROW))
+        .bg(if eq.enabled {
+            theme::accent()
+        } else {
+            theme::surface_elevated()
+        })
+        .text_color(if eq.enabled {
+            theme::accent_foreground()
+        } else {
+            theme::text()
+        })
+        .cursor_pointer()
+        .hover(|style| style.opacity(0.9))
+        .text_size(theme::Text::Small.size())
+        .child(toggle_label)
+        .on_click(cx.listener(move |root, _event: &ClickEvent, _window, cx| {
+            let next = EqGains {
+                enabled: !root.settings.eq.enabled,
+                ..root.settings.eq
+            };
+            root.set_eq(next, cx);
+        }));
+
+    settings_card(Some("音效预设"))
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(theme::space::SM))
+                .child(toggle)
+                .children(preset_pills),
+        )
+        .into_any_element()
+}
+
+/// 均衡器卡片内容：前级 + 10 段双列。
+fn effects_eq_card(root: &Root, cx: &mut Context<Root>) -> AnyElement {
     // 频段双列排布：左列 32~500 Hz，右列 1K~16K，一行一对，节省纵向空间。
     let mut band_rows: Vec<AnyElement> = Vec::new();
     for row in 0..5 {
@@ -95,66 +138,15 @@ fn eq_section(root: &Root, cx: &mut Context<Root>) -> AnyElement {
                 .into_any_element(),
         );
     }
-
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(theme::space::SM))
-        .child(
-            div()
-                .text_size(theme::Text::Large.size())
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme::text())
-                .child(root.tr("音效")),
-        )
-        .child(
-            div()
-                .text_size(theme::Text::Small.size())
-                .text_color(theme::text_muted())
-                .child(root.tr("正值增强、负值减弱；立即生效并随配置保存")),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap(px(theme::space::SM))
-                .child(
-                    div()
-                        .id("eq-toggle")
-                        .h(px(theme::size::CONTROL_SM))
-                        .px(px(theme::space::MD))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(theme::radius::ROW))
-                        .bg(if eq.enabled {
-                            theme::surface_selected()
-                        } else {
-                            theme::surface_elevated()
-                        })
-                        .hover(|style| style.bg(theme::surface_hover()))
-                        .cursor_pointer()
-                        .text_size(theme::Text::Small.size())
-                        .child(toggle_label)
-                        .on_click(cx.listener(move |root, _event: &ClickEvent, _window, cx| {
-                            let next = EqGains {
-                                enabled: !root.settings.eq.enabled,
-                                ..root.settings.eq
-                            };
-                            root.set_eq(next, cx);
-                        })),
-                )
-                .children(preset_pills),
-        )
+    settings_card(Some("均衡器"))
         .child(eq_slider_row(root, PREAMP_SLOT, cx))
         .children(band_rows)
-        .child(
-            div()
-                .text_size(theme::Text::Small.size())
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme::text())
-                .child(root.tr("空间混响")),
-        )
+        .into_any_element()
+}
+
+/// 空间混响卡片内容：强度 + 空间大小。
+fn effects_reverb_card(root: &Root, cx: &mut Context<Root>) -> AnyElement {
+    settings_card(Some("空间混响"))
         .child(
             div()
                 .text_size(theme::Text::Tiny.size())
@@ -547,19 +539,6 @@ fn window_controls_section(root: &Root, cx: &mut Context<Root>) -> Option<AnyEle
             .gap(px(theme::space::XS))
             .child(
                 div()
-                    .text_size(theme::Text::Large.size())
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme::text())
-                    .child(root.tr("窗口")),
-            )
-            .child(
-                div()
-                    .text_size(theme::Text::Small.size())
-                    .text_color(theme::text_muted())
-                    .child(root.tr("Linux 下是否自绘最小化 / 最大化 / 关闭按钮")),
-            )
-            .child(
-                div()
                     .flex()
                     .flex_col()
                     .gap(px(theme::space::XS))
@@ -577,47 +556,30 @@ fn window_controls_section(_root: &Root, _cx: &mut Context<Root>) -> Option<AnyE
 fn search_history_section(root: &Root, cx: &mut Context<Root>) -> AnyElement {
     let enabled = root.settings.search_history_is_enabled();
     let count = root.settings.search_history.len();
-    let mut section = div()
-        .flex()
-        .flex_col()
-        .gap(px(theme::space::XS))
-        .child(
-            div()
-                .text_size(theme::Text::Large.size())
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme::text())
-                .child(root.tr("搜索历史")),
-        )
-        .child(
-            div()
-                .text_size(theme::Text::Small.size())
-                .text_color(theme::text_muted())
-                .child(root.tr("仅保存在本机，最多保留 10 条；关闭后会清空记录")),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap(px(theme::space::LG))
-                .px(px(theme::space::MD))
-                .py(px(theme::space::SM))
-                .rounded(px(theme::radius::ROW))
-                .bg(theme::surface())
-                .child(
-                    div()
-                        .text_size(theme::Text::Body.size())
-                        .text_color(theme::text())
-                        .child(root.tr("保存搜索历史")),
-                )
-                .child(crate::ui::switch::render(
-                    "search-history-toggle",
-                    enabled,
-                    |root, _window, cx| root.toggle_search_history(cx),
-                    cx,
-                )),
-        );
+    let mut section = div().flex().flex_col().gap(px(theme::space::XS)).child(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(px(theme::space::LG))
+            .px(px(theme::space::MD))
+            .py(px(theme::space::SM))
+            .rounded(px(theme::radius::ROW))
+            .bg(theme::surface())
+            .child(
+                div()
+                    .text_size(theme::Text::Body.size())
+                    .text_color(theme::text())
+                    .child(root.tr("保存搜索历史")),
+            )
+            .child(crate::ui::switch::render(
+                "search-history-toggle",
+                enabled,
+                |root, _window, cx| root.toggle_search_history(cx),
+                cx,
+            )),
+    );
 
     if count > 0 {
         section = section.child(
@@ -707,19 +669,6 @@ fn diagnostic_log_section(root: &Root, cx: &mut Context<Root>) -> AnyElement {
         .gap(px(theme::space::SM))
         .child(
             div()
-                .text_size(theme::Text::Large.size())
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme::text())
-                .child(root.tr("诊断日志")),
-        )
-        .child(
-            div()
-                .text_size(theme::Text::Small.size())
-                .text_color(theme::text_muted())
-                .child(root.tr("默认记录在本机，用于排查播放问题；「清空缓存」不会删除它们")),
-        )
-        .child(
-            div()
                 .truncate()
                 .text_size(theme::Text::Small.size())
                 .text_color(theme::text_muted())
@@ -783,102 +732,307 @@ fn diagnostic_log_section(root: &Root, cx: &mut Context<Root>) -> AnyElement {
         .into_any_element()
 }
 
-pub(crate) fn settings_view(root: &mut Root, cx: &mut Context<Root>) -> AnyElement {
-    // 档位与名称都从核心层派生（`TIERS` + `label_key`），这里只保留每档的说明文案：
-    // 否则往 `TIERS` 加一档时，设置页会静默少一项。
-    // 档位是“上限”而不是“目标”：libresoda 在没有任何候选低于上限时，会回退成全部候选
-    //（实际可能比所选更高），所以这里说“优先 / 由服务端回退”，不承诺“只降一档”。
-    let hint_key = |value: &str| -> &'static str {
-        match value {
-            "hires" => "优先 Hi-Res 无损；没有可用档位时由服务端回退",
-            "lossless" => "优先无损；没有可用无损时由服务端回退",
-            "dolby" => "优先杜比全景声；没有可用档位时由服务端回退",
-            "highest" => "优先极高（≈320k）；没有可用档位时由服务端回退",
-            "medium" => "优先较高；没有可用档位时由服务端回退",
-            "low" => "优先流畅（≈128k）；没有可用档位时由服务端回退",
-            _ => "不设上限，按账号权益和单曲可用档位取最高",
+/// 设置页的三级分类（中栏二级菜单项）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SettingsSection {
+    #[default]
+    Account,
+    Theme,
+    Language,
+    SearchHistory,
+    Window,
+    Quality,
+    Effects,
+    Cache,
+    Shortcuts,
+    About,
+}
+
+impl SettingsSection {
+    /// 菜单展示顺序。窗口控制只对 Linux 有意义（macOS/Windows 由系统负责装饰）。
+    fn all() -> &'static [SettingsSection] {
+        &[
+            Self::Account,
+            Self::Theme,
+            Self::Language,
+            Self::SearchHistory,
+            #[cfg(target_os = "linux")]
+            Self::Window,
+            Self::Quality,
+            Self::Effects,
+            Self::Cache,
+            Self::Shortcuts,
+            Self::About,
+        ]
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Account => "account",
+            Self::Theme => "theme",
+            Self::Language => "language",
+            Self::SearchHistory => "search-history",
+            Self::Window => "window",
+            Self::Quality => "quality",
+            Self::Effects => "effects",
+            Self::Cache => "cache",
+            Self::Shortcuts => "shortcuts",
+            Self::About => "about",
         }
-    };
-    let language = root.language;
-    let label_for = |value: &str| crate::ui::player_bar::quality_label(value, language);
-    let options: Vec<(&str, String)> = std::iter::once(sodam_core::quality::AUTO)
-        .chain(sodam_core::quality::TIERS)
-        .map(|value| (value, label_for(value)))
-        .collect();
-    // 批量升级同样从 `TIERS` 派生，避免播放档位能选、批量升级却少几档。
-    let batch_tiers: Vec<(&str, String)> = sodam_core::quality::TIERS
-        .into_iter()
-        .map(|tier| (tier, label_for(tier)))
-        .collect();
-    // 先建行再交给 `children`：在 `children(map(...))` 里直接展开会让 rustfmt 反复改缩进。
-    let batch_tier_rows: Vec<AnyElement> = batch_tiers
-        .into_iter()
-        .enumerate()
-        .map(|(index, (tier, label))| {
-            let is_selected = root.batch_upgrade_target
-                == sodam_core::quality::QualityIntent::Tier(tier.to_string());
+    }
+
+    fn label_key(self) -> &'static str {
+        match self {
+            Self::Account => "账号信息",
+            Self::Theme => "主题",
+            Self::Language => "语言",
+            Self::SearchHistory => "搜索历史",
+            Self::Window => "窗口",
+            Self::Quality => "音质偏好",
+            Self::Effects => "音效",
+            Self::Cache => "缓存",
+            Self::Shortcuts => "快捷键",
+            Self::About => "关于",
+        }
+    }
+}
+
+/// 三级页里的分组卡片：圆角描边容器，可选内标题（参考官方客户端的分组卡）。
+fn settings_card(title_key: Option<&'static str>) -> gpui::Div {
+    let mut card = div()
+        .flex()
+        .flex_col()
+        .gap(px(theme::space::SM))
+        .p(px(theme::space::MD))
+        .rounded(px(theme::radius::CARD))
+        .bg(theme::surface_elevated())
+        .border_1()
+        .border_color(theme::border());
+    if let Some(key) = title_key {
+        card = card.child(
             div()
-                .id(("batch-upgrade-tier", index))
-                .h(px(theme::size::CONTROL_SM))
-                .px(px(theme::space::MD))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(theme::radius::ROW))
-                .bg(if is_selected {
-                    theme::surface_selected()
-                } else {
-                    theme::surface_elevated()
-                })
-                .hover(|style| style.bg(theme::surface_hover()))
-                .cursor_pointer()
                 .text_size(theme::Text::Small.size())
-                .child(label)
-                .on_click(cx.listener(move |root, _event: &ClickEvent, _window, cx| {
-                    if !root.batch_upgrading {
-                        root.set_batch_upgrade_target(
-                            sodam_core::quality::QualityIntent::Tier(tier.to_string()),
-                            cx,
-                        );
-                    }
-                }))
-                .into_any_element()
-        })
-        .collect();
-    let batch_target = root.batch_upgrade_target.clone();
-    let batch_target_label = label_for(batch_target.as_setting());
-    // 需要会员的档位只在账号**确认**有权益时才放行；与 `start_batch_upgrade` 共用同一条
-    // 判定，按钮状态和执行结果不会各说各话。
-    let batch_upgrade_blocked_by_vip =
-        sodam_core::quality::batch_upgrade_needs_confirmed_entitlement(
-            &batch_target,
-            root.account.as_ref().map(|account| account.vip),
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme::text())
+                .child(key),
         );
-    // 勾选的是**意图**；配置里的空串是历史写法，按「自动」显示。
-    let current = root.settings.quality_intent().as_setting().to_string();
+    }
+    card
+}
 
-    // 来源提示与徽章：区分用户手动选择、程序推导与未知来源。
-    // 在全新未配置的「自动」项上（Unknown + Auto）不展示徽章，避免新用户误解。
-    let (source_badge, source_hint) =
-        match (root.settings.quality_source, root.settings.quality_intent()) {
-            (sodam_core::quality::QualitySource::Derived, _) => (
-                Some(root.tr("程序推导")),
-                Some(root.tr("当前档位由程序推导，点「自动」即可恢复跟随账号权益")),
-            ),
-            (
-                sodam_core::quality::QualitySource::Unknown,
-                sodam_core::quality::QualityIntent::Auto,
-            ) => (None, None),
-            (sodam_core::quality::QualitySource::Unknown, _) => (
-                Some(root.tr("来源未知")),
-                Some(root.tr("若不是你选的，点「自动」即可恢复跟随账号权益")),
-            ),
-            (sodam_core::quality::QualitySource::User, _) => (
-                Some(root.tr("手动选择")),
-                Some(root.tr("当前档位由手动选择")),
-            ),
-        };
+/// 三级页页头：大标题 + 灰色副标题。
+fn page_header(title: &'static str, subtitle: Option<String>) -> AnyElement {
+    let mut header = div().flex().flex_col().gap(px(theme::space::XS)).child(
+        div()
+            .text_size(theme::Text::Large.size())
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(theme::text())
+            .child(title),
+    );
+    if let Some(subtitle) = subtitle {
+        header = header.child(
+            div()
+                .text_size(theme::Text::Small.size())
+                .text_color(theme::text_muted())
+                .child(subtitle),
+        );
+    }
+    header.into_any_element()
+}
 
+/// 设置入口：左中栏（设置卡片式菜单）+ 右栏（三级配置页，独立滚动）。
+pub(crate) fn settings_view(root: &mut Root, cx: &mut Context<Root>) -> AnyElement {
+    if root.settings_section == SettingsSection::About {
+        root.ensure_contributors(cx);
+    }
+    div()
+        .flex()
+        .flex_row()
+        .flex_1()
+        .min_h(px(0.0))
+        .gap(px(theme::space::LG))
+        .child(settings_menu(root, cx))
+        .child(
+            div()
+                .id("settings-scroll")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(0.0))
+                .min_h(px(0.0))
+                .overflow_y_scroll()
+                .child(settings_page(root, cx)),
+        )
+        .into_any_element()
+}
+
+/// 中栏：「设置」卡片 + 二级分类菜单，选中项用强调色高亮。
+fn settings_menu(root: &Root, cx: &mut Context<Root>) -> AnyElement {
+    div()
+        .w(px(230.0))
+        .flex_none()
+        .h_full()
+        .flex()
+        .flex_col()
+        .gap(px(theme::space::XS))
+        .p(px(theme::space::MD))
+        .rounded(px(theme::radius::CARD))
+        .bg(theme::surface_elevated())
+        .border_1()
+        .border_color(theme::border())
+        .child(
+            div()
+                .px(px(theme::space::SM))
+                .py(px(theme::space::MD))
+                .text_size(theme::Text::Large.size())
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme::text())
+                .child(root.tr("设置")),
+        )
+        .children(SettingsSection::all().iter().map(|section| {
+            let selected = *section == root.settings_section;
+            div()
+                .id(gpui::ElementId::Name(
+                    format!("settings-menu-{}", section.id()).into(),
+                ))
+                .px(px(theme::space::MD))
+                .py(px(theme::space::SM))
+                .rounded(px(theme::radius::ROW))
+                .cursor_pointer()
+                .when(selected, |this| this.bg(theme::accent()))
+                .when(!selected, |this| {
+                    this.hover(|style| style.bg(theme::surface_hover()))
+                })
+                .text_size(theme::Text::Body.size())
+                .text_color(if selected {
+                    theme::accent_foreground()
+                } else {
+                    theme::text()
+                })
+                .child(root.tr(section.label_key()))
+                .on_click(cx.listener(move |root, _event: &ClickEvent, _window, cx| {
+                    root.set_settings_section(*section, cx);
+                }))
+        }))
+        .into_any_element()
+}
+
+/// 右栏：按选中的二级菜单项渲染三级配置页。
+fn settings_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
+    match root.settings_section {
+        SettingsSection::Account => account_page(root, cx),
+        SettingsSection::Theme => theme_page(root, cx),
+        SettingsSection::Language => language_page(root, cx),
+        SettingsSection::SearchHistory => search_history_page(root, cx),
+        SettingsSection::Window => window_page(root, cx),
+        SettingsSection::Quality => quality_page(root, cx),
+        SettingsSection::Effects => effects_page(root, cx),
+        SettingsSection::Cache => cache_page(root, cx),
+        SettingsSection::Shortcuts => shortcuts_page(root, cx),
+        SettingsSection::About => about_page(root, cx),
+    }
+}
+
+/// 账号页：账号卡片 + 签名服务与配置文件（原「其他」块）。
+fn account_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(theme::space::LG))
+        .child(page_header(
+            root.tr("账号信息"),
+            Some(root.tr("签名服务、设备指纹与登录状态").to_string()),
+        ))
+        .child(account_section(root, cx))
+        .child(
+            settings_card(Some(root.tr("其他")))
+                .child(
+                    div()
+                        .text_size(theme::Text::Small.size())
+                        .text_color(theme::text_muted())
+                        .child(if root.language.resolved().is_zh() {
+                            root.localized(
+                                "签名服务：{}",
+                                &[if root.settings.signer_url.trim().is_empty() {
+                                    root.tr("（未配置）").to_string()
+                                } else {
+                                    root.settings.signer_url.trim().to_string()
+                                }],
+                            )
+                        } else {
+                            format!(
+                                "Signer: {}",
+                                if root.settings.signer_url.trim().is_empty() {
+                                    root.tr("（未配置）")
+                                } else {
+                                    root.settings.signer_url.trim()
+                                }
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(theme::space::SM))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .truncate()
+                                .text_size(theme::Text::Small.size())
+                                .text_color(theme::text_muted())
+                                .child(if root.language.resolved().is_zh() {
+                                    root.localized(
+                                        "配置：{}",
+                                        &[sodam_core::Settings::config_path()
+                                            .display()
+                                            .to_string()],
+                                    )
+                                } else {
+                                    format!(
+                                        "Config: {}",
+                                        sodam_core::Settings::config_path().display()
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id("edit-config")
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_center()
+                                .flex_none()
+                                .h(px(theme::size::CONTROL_SM))
+                                .px(px(theme::space::MD))
+                                .rounded(px(theme::radius::ROW))
+                                .bg(theme::surface_elevated())
+                                .cursor_pointer()
+                                .hover(|style| style.bg(theme::surface_hover()))
+                                .on_click(cx.listener(|root, _event: &ClickEvent, _window, cx| {
+                                    root.open_config_file(cx);
+                                }))
+                                .child(
+                                    div()
+                                        .text_size(theme::Text::Tiny.size())
+                                        .text_color(theme::text_muted())
+                                        .child(root.tr("Edit")),
+                                ),
+                        ),
+                ),
+        )
+        .into_any_element()
+}
+
+/// 主题页：跟随系统 / 深色 / 浅色。
+fn theme_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
+    let subtitle = if root.theme_follows_system {
+        root.tr("当前跟随系统偏好，手动选择后会固定主题")
+    } else {
+        root.tr("已固定主题；可随时切换深色或浅色")
+    };
     let theme_rows: Vec<AnyElement> = [
         (None, root.tr("跟随系统")),
         (Some(ThemeKind::Dark), root.tr("深色")),
@@ -961,6 +1115,190 @@ pub(crate) fn settings_view(root: &mut Root, cx: &mut Context<Root>) -> AnyEleme
     })
     .collect();
 
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(theme::space::LG))
+        .child(page_header(root.tr("主题"), Some(subtitle.to_string())))
+        .child(settings_card(None).children(theme_rows))
+        .into_any_element()
+}
+
+/// 语言页：跟随系统 / 中文 / English。
+fn language_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
+    let subtitle = if root.language_follows_system {
+        root.tr("当前跟随系统语言；手动选择后会固定语言")
+    } else {
+        root.tr("已固定语言；可随时切换中文或 English")
+    };
+    let language_rows: Vec<AnyElement> = [
+        (Language::System, root.tr("跟随系统")),
+        (Language::Chinese, "中文"),
+        (Language::English, "English"),
+    ]
+    .into_iter()
+    .map(|(value, title)| {
+        let chosen = if root.language_follows_system {
+            matches!(value, Language::System)
+        } else {
+            !matches!(value, Language::System) && root.language == value
+        };
+        div()
+            .id(gpui::ElementId::Name(
+                format!("language-set-{:?}", value).into(),
+            ))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(px(theme::space::LG))
+            .px(px(theme::space::MD))
+            .py(px(theme::space::SM))
+            .rounded(px(theme::radius::ROW))
+            .cursor_pointer()
+            .when(chosen, |this| this.bg(theme::surface_selected()))
+            .hover(|style| style.bg(theme::surface_hover()))
+            .on_click(cx.listener(move |root, _event: &ClickEvent, _window, cx| {
+                match value {
+                    Language::System => {
+                        root.language = Language::system_locale();
+                        root.language_follows_system = true;
+                        root.settings.language = "auto".to_string();
+                        if let Err(err) = root.settings.save() {
+                            let message = root.failure_text(
+                                "语言已恢复为跟随系统，但保存失败",
+                                &err,
+                                SAVE_TEXT,
+                            );
+                            root.notify_error_once("language-save-failed", message);
+                        } else {
+                            let status = if root.language.is_zh() {
+                                root.tr("语言已恢复为跟随系统").to_string()
+                            } else {
+                                "Language restored to system".to_string()
+                            };
+                            root.set_status_text(status);
+                        }
+                        // macOS 菜单栏的标题也要跟着换语言。
+                        #[cfg(target_os = "macos")]
+                        crate::menus::refresh(cx, root.language);
+                    }
+                    language => root.set_language(language, cx),
+                }
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .text_size(theme::Text::Body.size())
+                    .text_color(if chosen {
+                        theme::text()
+                    } else {
+                        theme::text_muted()
+                    })
+                    .child(title),
+            )
+            .when(chosen, |this| {
+                this.child(
+                    svg()
+                        .path(icons::path("check"))
+                        .size(px(theme::ICON))
+                        .text_color(theme::accent()),
+                )
+            })
+            .into_any_element()
+    })
+    .collect();
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(theme::space::LG))
+        .child(page_header(root.tr("语言"), Some(subtitle.to_string())))
+        .child(settings_card(None).children(language_rows))
+        .into_any_element()
+}
+
+/// 搜索历史页。
+fn search_history_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(theme::space::LG))
+        .child(page_header(
+            root.tr("搜索历史"),
+            Some(
+                root.tr("仅保存在本机，最多保留 10 条；关闭后会清空记录")
+                    .to_string(),
+            ),
+        ))
+        .child(settings_card(None).child(search_history_section(root, cx)))
+        .into_any_element()
+}
+
+/// 窗口页（仅 Linux 菜单可见）：是否自绘标题栏按钮。
+fn window_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(theme::space::LG))
+        .child(page_header(
+            root.tr("窗口"),
+            Some(
+                root.tr("Linux 下是否自绘最小化 / 最大化 / 关闭按钮")
+                    .to_string(),
+            ),
+        ))
+        .child(settings_card(None).children(window_controls_section(root, cx)))
+        .into_any_element()
+}
+
+/// 音质页：意图选择 + 来源徽章。
+fn quality_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
+    // 档位与名称都从核心层派生（`TIERS` + `label_key`），这里只保留每档的说明文案：
+    // 否则往 `TIERS` 加一档时，设置页会静默少一项。
+    // 档位是“上限”而不是“目标”：libresoda 在没有任何候选低于上限时，会回退成全部候选
+    //（实际可能比所选更高），所以这里说“优先 / 由服务端回退”，不承诺“只降一档”。
+    let hint_key = |value: &str| -> &'static str {
+        match value {
+            "hires" => "优先 Hi-Res 无损；没有可用档位时由服务端回退",
+            "lossless" => "优先无损；没有可用无损时由服务端回退",
+            "dolby" => "优先杜比全景声；没有可用档位时由服务端回退",
+            "highest" => "优先极高（≈320k）；没有可用档位时由服务端回退",
+            "medium" => "优先较高；没有可用档位时由服务端回退",
+            "low" => "优先流畅（≈128k）；没有可用档位时由服务端回退",
+            _ => "不设上限，按账号权益和单曲可用档位取最高",
+        }
+    };
+    let language = root.language;
+    let label_for = |value: &str| crate::ui::player_bar::quality_label(value, language);
+    let options: Vec<(&str, String)> = std::iter::once(sodam_core::quality::AUTO)
+        .chain(sodam_core::quality::TIERS)
+        .map(|value| (value, label_for(value)))
+        .collect();
+    // 勾选的是**意图**；配置里的空串是历史写法，按「自动」显示。
+    let current = root.settings.quality_intent().as_setting().to_string();
+    // 来源提示与徽章：区分用户手动选择、程序推导与未知来源。
+    // 在全新未配置的「自动」项上（Unknown + Auto）不展示徽章，避免新用户误解。
+    let (source_badge, source_hint) =
+        match (root.settings.quality_source, root.settings.quality_intent()) {
+            (sodam_core::quality::QualitySource::Derived, _) => (
+                Some(root.tr("程序推导")),
+                Some(root.tr("当前档位由程序推导，点「自动」即可恢复跟随账号权益")),
+            ),
+            (
+                sodam_core::quality::QualitySource::Unknown,
+                sodam_core::quality::QualityIntent::Auto,
+            ) => (None, None),
+            (sodam_core::quality::QualitySource::Unknown, _) => (
+                Some(root.tr("来源未知")),
+                Some(root.tr("若不是你选的，点「自动」即可恢复跟随账号权益")),
+            ),
+            (sodam_core::quality::QualitySource::User, _) => (
+                Some(root.tr("手动选择")),
+                Some(root.tr("当前档位由手动选择")),
+            ),
+        };
+
     let rows: Vec<AnyElement> = options
         .iter()
         .map(|(value, title)| {
@@ -1038,242 +1376,230 @@ pub(crate) fn settings_view(root: &mut Root, cx: &mut Context<Root>) -> AnyEleme
         })
         .collect();
 
-    let account_card = account_section(root, cx);
+    let mut card = settings_card(None).children(rows);
+    if let Some(hint) = source_hint {
+        card = card.child(
+            div()
+                .text_size(theme::Text::Tiny.size())
+                .text_color(theme::text_faint())
+                .child(hint),
+        );
+    }
 
     div()
-        .id("settings-scroll")
         .flex()
         .flex_col()
-        .flex_1()
-        .min_h(px(0.0))
         .gap(px(theme::space::LG))
-        .overflow_y_scroll()
-        .child(account_card)
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(theme::space::XS))
-                .child(
-                    div()
-                        .text_size(theme::Text::Large.size())
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::text())
-                        .child(root.tr("主题")),
-                )
-                .child(
-                    div()
-                        .text_size(theme::Text::Small.size())
-                        .text_color(theme::text_muted())
-                        .child(if root.theme_follows_system {
-                            root.tr("当前跟随系统偏好，手动选择后会固定主题")
-                                .to_string()
-                        } else {
-                            root.tr("已固定主题；可随时切换深色或浅色").to_string()
-                        }),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(theme::space::XS))
-                .children(theme_rows),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(theme::space::XS))
-                .child(
-                    div()
-                        .text_size(theme::Text::Large.size())
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::text())
-                        .child(root.tr("语言")),
-                )
-                .child(
-                    div()
-                        .text_size(theme::Text::Small.size())
-                        .text_color(theme::text_muted())
-                        .child(if root.language_follows_system {
-                            root.tr("当前跟随系统语言；手动选择后会固定语言")
-                        } else {
-                            root.tr("已固定语言；可随时切换中文或 English")
-                        }),
-                ),
-        )
-        .child(
-            div().flex().flex_col().gap(px(theme::space::XS)).children(
-                [
-                    (Language::System, root.tr("跟随系统")),
-                    (Language::Chinese, "中文"),
-                    (Language::English, "English"),
-                ]
-                .into_iter()
-                .map(|(value, title)| {
-                    let chosen = if root.language_follows_system {
-                        matches!(value, Language::System)
-                    } else {
-                        !matches!(value, Language::System) && root.language == value
-                    };
-                    div()
-                        .id(gpui::ElementId::Name(
-                            format!("language-set-{:?}", value).into(),
-                        ))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(theme::space::LG))
-                        .px(px(theme::space::MD))
-                        .py(px(theme::space::SM))
-                        .rounded(px(theme::radius::ROW))
-                        .cursor_pointer()
-                        .when(chosen, |this| this.bg(theme::surface_selected()))
-                        .hover(|style| style.bg(theme::surface_hover()))
-                        .on_click(cx.listener(move |root, _event: &ClickEvent, _window, cx| {
-                            match value {
-                                Language::System => {
-                                    root.language = Language::system_locale();
-                                    root.language_follows_system = true;
-                                    root.settings.language = "auto".to_string();
-                                    if let Err(err) = root.settings.save() {
-                                        let message = root.failure_text(
-                                            "语言已恢复为跟随系统，但保存失败",
-                                            &err,
-                                            SAVE_TEXT,
-                                        );
-                                        root.notify_error_once("language-save-failed", message);
-                                    } else {
-                                        let status = if root.language.is_zh() {
-                                            root.tr("语言已恢复为跟随系统").to_string()
-                                        } else {
-                                            "Language restored to system".to_string()
-                                        };
-                                        root.set_status_text(status);
-                                    }
-                                    // macOS 菜单栏的标题也要跟着换语言。
-                                    #[cfg(target_os = "macos")]
-                                    crate::menus::refresh(cx, root.language);
-                                }
-                                language => root.set_language(language, cx),
-                            }
-                            cx.notify();
-                        }))
-                        .child(
-                            div()
-                                .text_size(theme::Text::Body.size())
-                                .text_color(if chosen {
-                                    theme::text()
-                                } else {
-                                    theme::text_muted()
-                                })
-                                .child(title),
-                        )
-                        .when(chosen, |this| {
-                            this.child(
-                                svg()
-                                    .path(icons::path("check"))
-                                    .size(px(theme::ICON))
-                                    .text_color(theme::accent()),
-                            )
-                        })
-                })
-                .collect::<Vec<_>>(),
+        .child(page_header(
+            root.tr("音质偏好"),
+            Some(
+                root.tr("自动 = 取当前账号能拿到的最高档，单曲没有该档位时自动降一档")
+                    .to_string(),
             ),
+        ))
+        .child(card)
+        .into_any_element()
+}
+
+/// 音效页：预设 + 均衡器 + 空间混响，三个分组卡片。
+fn effects_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(theme::space::LG))
+        .child(page_header(
+            root.tr("音效"),
+            Some(
+                root.tr("正值增强、负值减弱；立即生效并随配置保存")
+                    .to_string(),
+            ),
+        ))
+        .child(effects_presets_card(root, cx))
+        .child(effects_eq_card(root, cx))
+        .child(effects_reverb_card(root, cx))
+        .into_any_element()
+}
+
+/// 缓存页：占用统计 / 上限 / 清理 + 批量升级缓存。
+fn cache_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
+    // 显示占用大小 + 一键清理（统计读后台快照，不在渲染路径扫盘）
+    let (audio_bytes, audio_files, cover_bytes, cover_files) = root.cache_summary;
+    let total = audio_bytes + cover_bytes;
+    let usage = if root.language.resolved().is_zh() {
+        root.localized(
+            "共 {}（歌曲 {} 首 {} / 封面 {} 张 {}）",
+            &[
+                human_bytes(total),
+                audio_files.to_string(),
+                human_bytes(audio_bytes),
+                cover_files.to_string(),
+                human_bytes(cover_bytes),
+            ],
         )
-        .child(search_history_section(root, cx))
-        .children(window_controls_section(root, cx))
-        .child(
+    } else {
+        format!(
+            "Total {} ({} songs {}, {} covers {})",
+            human_bytes(total),
+            audio_files,
+            human_bytes(audio_bytes),
+            cover_files,
+            human_bytes(cover_bytes)
+        )
+    };
+
+    // 批量升级同样从 `TIERS` 派生，避免播放档位能选、批量升级却少几档。
+    let language = root.language;
+    let label_for = |value: &str| crate::ui::player_bar::quality_label(value, language);
+    let batch_tiers: Vec<(&str, String)> = sodam_core::quality::TIERS
+        .into_iter()
+        .map(|tier| (tier, label_for(tier)))
+        .collect();
+    let batch_tier_rows: Vec<AnyElement> = batch_tiers
+        .into_iter()
+        .enumerate()
+        .map(|(index, (tier, label))| {
+            let is_selected = root.batch_upgrade_target
+                == sodam_core::quality::QualityIntent::Tier(tier.to_string());
             div()
+                .id(("batch-upgrade-tier", index))
+                .h(px(theme::size::CONTROL_SM))
+                .px(px(theme::space::MD))
                 .flex()
-                .flex_col()
-                .gap(px(theme::space::XS))
-                .child(
-                    div()
-                        .text_size(theme::Text::Large.size())
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::text())
-                        .child(root.tr("音质偏好")),
-                )
-                .child(
-                    div()
-                        .text_size(theme::Text::Small.size())
-                        .text_color(theme::text_muted())
-                        .child(
-                            root.tr("自动 = 取当前账号能拿到的最高档，单曲没有该档位时自动降一档"),
-                        ),
-                )
-                .children(source_hint.map(|hint| {
-                    div()
-                        .text_size(theme::Text::Tiny.size())
-                        .text_color(theme::text_faint())
-                        .child(hint)
+                .items_center()
+                .justify_center()
+                .rounded(px(theme::radius::ROW))
+                .bg(if is_selected {
+                    theme::surface_selected()
+                } else {
+                    theme::surface_elevated()
+                })
+                .hover(|style| style.bg(theme::surface_hover()))
+                .cursor_pointer()
+                .text_size(theme::Text::Small.size())
+                .child(label)
+                .on_click(cx.listener(move |root, _event: &ClickEvent, _window, cx| {
+                    if !root.batch_upgrading {
+                        root.set_batch_upgrade_target(
+                            sodam_core::quality::QualityIntent::Tier(tier.to_string()),
+                            cx,
+                        );
+                    }
                 }))
-                .child(
-                    // 缓存按意图命名：自动档下同一首歌永远命中同一个文件，所以权益变了
-                    // 也不会在旧曲上生效。这是主流客户端的一致行为，必须提前说明。
-                    div()
-                        .text_size(theme::Text::Tiny.size())
-                        .text_color(theme::text_faint())
-                        .child(
-                            root.tr(
-                                "已缓存的歌曲会保持原来的档位；想按新权益重取，清空缓存或换一首",
-                            ),
-                        ),
-                ),
-        )
+                .into_any_element()
+        })
+        .collect();
+    let batch_target = root.batch_upgrade_target.clone();
+    let batch_target_label = label_for(batch_target.as_setting());
+    // 需要会员的档位只在账号**确认**有权益时才放行；与 `start_batch_upgrade` 共用同一条
+    // 判定，按钮状态和执行结果不会各说各话。
+    let batch_upgrade_blocked_by_vip =
+        sodam_core::quality::batch_upgrade_needs_confirmed_entitlement(
+            &batch_target,
+            root.account.as_ref().map(|account| account.vip),
+        );
+
+    let estimate = {
+        // 档位未知的旧缓存另起一行（#89）：这几首不是「已知比目标低」，是旧版本
+        // 没记档位。被权益挡住、或这一轮全都抑制掉了，也要照样报出来——
+        // 「没有可升级的缓存歌曲」在这种存量下就不是实话（P5 的原话）。
+        // 只报事实、不写「需重下」：这一轮到底会不会重下已经由上一行的可升级数说过。
+        let legacy_note = if root.batch_upgrading {
+            None
+        } else {
+            root.batch_upgrade_estimate
+                .as_ref()
+                .filter(|estimate| estimate.unknown_rank_count > 0)
+                .map(|estimate| {
+                    root.localized(
+                        "{} 首旧缓存未记录档位",
+                        &[estimate.unknown_rank_count.to_string()],
+                    )
+                })
+        };
+        let estimate_text = if batch_upgrade_blocked_by_vip {
+            root.localized(
+                "「{}」音质需 VIP 会员权限，当前账号未确认该权益",
+                std::slice::from_ref(&batch_target_label),
+            )
+        } else if root.batch_upgrading {
+            root.localized(
+                "正在升级 ({} / {})…",
+                &[
+                    root.batch_upgrade_progress.done.to_string(),
+                    root.batch_upgrade_progress.total.to_string(),
+                ],
+            )
+        } else if let Some(estimate) = &root.batch_upgrade_estimate {
+            if estimate.upgradeable_count == 0 {
+                root.tr("没有可升级的缓存歌曲：已达目标、无更高档位或当前缓存条件不支持升级")
+                    .to_string()
+            } else {
+                let delta = estimate.net_disk_delta_bytes();
+                let delta_str = if delta >= 0 {
+                    format!("+{}", human_bytes(delta as u64))
+                } else {
+                    format!("-{}", human_bytes((-delta) as u64))
+                };
+                root.localized(
+                    "{} 首歌曲可升级 · 预估流量 {} · 存储变化 {}",
+                    &[
+                        estimate.upgradeable_count.to_string(),
+                        human_bytes(estimate.estimated_traffic_bytes),
+                        delta_str,
+                    ],
+                )
+            }
+        } else {
+            root.tr("正在计算升级预估…").to_string()
+        };
+        div()
+            .text_size(theme::Text::Small.size())
+            .text_color(theme::text_muted())
+            .child(estimate_text)
+            .children(legacy_note)
+    };
+
+    let upgradeable = root
+        .batch_upgrade_estimate
+        .as_ref()
+        .map_or(0, |e| e.upgradeable_count);
+    let can_upgrade = !root.batch_upgrading && !batch_upgrade_blocked_by_vip && upgradeable > 0;
+    let mut upgrade_btn = div()
+        .id("batch-upgrade")
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(theme::size::CONTROL))
+        .w(px(140.0))
+        .rounded(px(theme::radius::ROW))
+        .text_size(theme::Text::Small.size());
+    if can_upgrade {
+        upgrade_btn = upgrade_btn
+            .bg(theme::accent())
+            .text_color(theme::accent_foreground())
+            .cursor_pointer()
+            .hover(|style| style.opacity(0.9))
+            .on_click(cx.listener(|root, _event: &ClickEvent, _window, cx| {
+                root.start_batch_upgrade(cx);
+            }));
+    } else {
+        upgrade_btn = upgrade_btn
+            .bg(theme::surface_elevated())
+            .text_color(theme::text_faint());
+    }
+    let upgrade_btn = upgrade_btn.child(if root.batch_upgrading {
+        root.tr("正在升级…")
+    } else {
+        root.tr("批量升级")
+    });
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(theme::space::LG))
+        .child(page_header(root.tr("缓存"), Some(usage)))
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(theme::space::XS))
-                .children(rows),
-        )
-        .child(eq_section(root, cx))
-        .child(super::shortcut_card::section(root, cx))
-        .child({
-            // 缓存：显示占用大小 + 一键清理（统计读后台快照，不在渲染路径扫盘）
-            let (audio_bytes, audio_files, cover_bytes, cover_files) = root.cache_summary;
-            let total = audio_bytes + cover_bytes;
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(theme::space::SM))
-                .child(
-                    div()
-                        .text_size(theme::Text::Large.size())
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::text())
-                        .child(root.tr("缓存")),
-                )
-                .child(
-                    div()
-                        .text_size(theme::Text::Small.size())
-                        .text_color(theme::text_muted())
-                        .child(if root.language.resolved().is_zh() {
-                            root.localized(
-                                "共 {}（歌曲 {} 首 {} / 封面 {} 张 {}）",
-                                &[
-                                    human_bytes(total),
-                                    audio_files.to_string(),
-                                    human_bytes(audio_bytes),
-                                    cover_files.to_string(),
-                                    human_bytes(cover_bytes),
-                                ],
-                            )
-                        } else {
-                            format!(
-                                "Total {} ({} songs {}, {} covers {})",
-                                human_bytes(total),
-                                audio_files,
-                                human_bytes(audio_bytes),
-                                cover_files,
-                                human_bytes(cover_bytes),
-                            )
-                        }),
-                )
+            settings_card(None)
                 .child(
                     div()
                         .text_size(theme::Text::Small.size())
@@ -1357,236 +1683,58 @@ pub(crate) fn settings_view(root: &mut Root, cx: &mut Context<Root>) -> AnyEleme
                         } else {
                             root.tr("清空缓存")
                         }),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(theme::space::XS))
-                        .mt(px(theme::space::SM))
-                        .child(
-                            div()
-                                .text_size(theme::Text::Large.size())
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(theme::text())
-                                .child(root.tr("批量升级缓存")),
-                        )
-                        .child(
-                            div()
-                                .text_size(theme::Text::Small.size())
-                                .text_color(theme::text_muted())
-                                .child(
-                                    root.tr(
-                                        "将已有低档位缓存重新拉取为更高音质，失败不会损坏旧缓存",
-                                    ),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .gap(px(theme::space::SM))
-                                .children(batch_tier_rows),
-                        )
-                        .child({
-                            // 档位未知的旧缓存另起一行（#89）：这几首不是「已知比目标低」，是旧版本
-                            // 没记档位。被权益挡住、或这一轮全都抑制掉了，也要照样报出来——
-                            // 「没有可升级的缓存歌曲」在这种存量下就不是实话（P5 的原话）。
-                            // 只报事实、不写「需重下」：这一轮到底会不会重下已经由上一行的可升级数说过。
-                            let legacy_note = if root.batch_upgrading {
-                                None
-                            } else {
-                                root.batch_upgrade_estimate
-                                    .as_ref()
-                                    .filter(|estimate| estimate.unknown_rank_count > 0)
-                                    .map(|estimate| {
-                                        root.localized(
-                                            "{} 首旧缓存未记录档位",
-                                            &[estimate.unknown_rank_count.to_string()],
-                                        )
-                                    })
-                            };
-                            let estimate_text = if batch_upgrade_blocked_by_vip {
-                                root.localized(
-                                    "「{}」音质需 VIP 会员权限，当前账号未确认该权益",
-                                    std::slice::from_ref(&batch_target_label),
-                                )
-                            } else if root.batch_upgrading {
-                                root.localized(
-                                    "正在升级 ({} / {})…",
-                                    &[
-                                        root.batch_upgrade_progress.done.to_string(),
-                                        root.batch_upgrade_progress.total.to_string(),
-                                    ],
-                                )
-                            } else if let Some(estimate) = &root.batch_upgrade_estimate {
-                                if estimate.upgradeable_count == 0 {
-                                    root.tr(
-                                        "没有可升级的缓存歌曲：已达目标、无更高档位或当前缓存条件不支持升级",
-                                    )
-                                    .to_string()
-                                } else {
-                                    let delta = estimate.net_disk_delta_bytes();
-                                    let delta_str = if delta >= 0 {
-                                        format!("+{}", human_bytes(delta as u64))
-                                    } else {
-                                        format!("-{}", human_bytes((-delta) as u64))
-                                    };
-                                    root.localized(
-                                        "{} 首歌曲可升级 · 预估流量 {} · 存储变化 {}",
-                                        &[
-                                            estimate.upgradeable_count.to_string(),
-                                            human_bytes(estimate.estimated_traffic_bytes),
-                                            delta_str,
-                                        ],
-                                    )
-                                }
-                            } else {
-                                root.tr("正在计算升级预估…").to_string()
-                            };
-                            div()
-                                .text_size(theme::Text::Small.size())
-                                .text_color(theme::text_muted())
-                                .child(estimate_text)
-                                .children(legacy_note)
-                        })
-                        .child({
-                            let upgradeable = root
-                                .batch_upgrade_estimate
-                                .as_ref()
-                                .map_or(0, |e| e.upgradeable_count);
-                            let can_upgrade = !root.batch_upgrading
-                                && !batch_upgrade_blocked_by_vip
-                                && upgradeable > 0;
-                            let mut btn = div()
-                                .id("batch-upgrade")
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .h(px(theme::size::CONTROL))
-                                .w(px(140.0))
-                                .rounded(px(theme::radius::ROW))
-                                .text_size(theme::Text::Small.size());
-
-                            if can_upgrade {
-                                btn = btn
-                                    .bg(theme::accent())
-                                    .text_color(theme::accent_foreground())
-                                    .cursor_pointer()
-                                    .hover(|style| style.opacity(0.9))
-                                    .on_click(cx.listener(
-                                        |root, _event: &ClickEvent, _window, cx| {
-                                            root.start_batch_upgrade(cx);
-                                        },
-                                    ));
-                            } else {
-                                btn = btn
-                                    .bg(theme::surface_elevated())
-                                    .text_color(theme::text_faint());
-                            }
-
-                            btn.child(if root.batch_upgrading {
-                                root.tr("正在升级…")
-                            } else {
-                                root.tr("批量升级")
-                            })
-                        }),
-                )
-        })
-        .child(diagnostic_log_section(root, cx))
+                ),
+        )
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(theme::space::XS))
-                .child(
-                    div()
-                        .text_size(theme::Text::Large.size())
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::text())
-                        .child(root.tr("其他")),
-                )
+            settings_card(Some(root.tr("批量升级缓存")))
                 .child(
                     div()
                         .text_size(theme::Text::Small.size())
                         .text_color(theme::text_muted())
-                        .child(if root.language.resolved().is_zh() {
-                            root.localized(
-                                "签名服务：{}",
-                                &[if root.settings.signer_url.trim().is_empty() {
-                                    root.tr("（未配置）").to_string()
-                                } else {
-                                    root.settings.signer_url.trim().to_string()
-                                }],
-                            )
-                        } else {
-                            format!(
-                                "Signer: {}",
-                                if root.settings.signer_url.trim().is_empty() {
-                                    root.tr("（未配置）")
-                                } else {
-                                    root.settings.signer_url.trim()
-                                }
-                            )
-                        }),
+                        .child(root.tr("将已有低档位缓存重新拉取为更高音质，失败不会损坏旧缓存")),
                 )
                 .child(
                     div()
                         .flex()
-                        .flex_row()
-                        .items_center()
+                        .flex_wrap()
                         .gap(px(theme::space::SM))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .truncate()
-                                .text_size(theme::Text::Small.size())
-                                .text_color(theme::text_muted())
-                                .child(if root.language.resolved().is_zh() {
-                                    root.localized(
-                                        "配置：{}",
-                                        &[sodam_core::Settings::config_path()
-                                            .display()
-                                            .to_string()],
-                                    )
-                                } else {
-                                    format!(
-                                        "Config: {}",
-                                        sodam_core::Settings::config_path().display()
-                                    )
-                                }),
-                        )
-                        .child(
-                            div()
-                                .id("edit-config")
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_center()
-                                .flex_none()
-                                .h(px(theme::size::CONTROL_SM))
-                                .px(px(theme::space::MD))
-                                .rounded(px(theme::radius::ROW))
-                                .bg(theme::surface_elevated())
-                                .cursor_pointer()
-                                .hover(|style| style.bg(theme::surface_hover()))
-                                .on_click(cx.listener(|root, _event: &ClickEvent, _window, cx| {
-                                    root.open_config_file(cx);
-                                }))
-                                .child(
-                                    div()
-                                        .text_size(theme::Text::Tiny.size())
-                                        .text_color(theme::text_muted())
-                                        .child(root.tr("Edit")),
-                                ),
-                        ),
-                ),
+                        .children(batch_tier_rows),
+                )
+                .child(estimate)
+                .child(upgrade_btn),
         )
-        .child({
-            let repository = env!("CARGO_PKG_REPOSITORY");
-            let contributors = root.contributors_image.clone();
-            root.ensure_contributors(cx);
+        .into_any_element()
+}
+
+/// 快捷键页：应用内播放控制键位（系统媒体键同样可用）。
+fn shortcuts_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
+    let subtitle = if cfg!(target_os = "macos") {
+        // ⌃←/⌃→ 是系统「切换桌面」的默认键，绑了也收不到。
+        root.tr("播放控制：系统媒体键同样可用；⌃←/⌃→ 被系统占用（切换桌面），别绑这两个")
+            .to_string()
+    } else {
+        root.tr("播放控制：系统媒体键同样可用；这里绑的是应用内快捷键")
+            .to_string()
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(theme::space::LG))
+        .child(page_header(root.tr("快捷键"), Some(subtitle)))
+        .child(super::shortcut_card::section(root, cx))
+        .into_any_element()
+}
+
+/// 关于页：版本与上游信息 + 贡献者 + 诊断日志。
+fn about_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
+    let repository = env!("CARGO_PKG_REPOSITORY");
+    let contributors = root.contributors_image.clone();
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(theme::space::LG))
+        .child(page_header(root.tr("关于"), None))
+        .child(
             div()
                 .id("about-footer")
                 .flex()
@@ -1736,7 +1884,8 @@ pub(crate) fn settings_view(root: &mut Root, cx: &mut Context<Root>) -> AnyEleme
                                 .child(root.tr("正在加载贡献者…"))
                                 .into_any_element()
                         }),
-                )
-        })
+                ),
+        )
+        .child(settings_card(Some(root.tr("诊断日志"))).child(diagnostic_log_section(root, cx)))
         .into_any_element()
 }

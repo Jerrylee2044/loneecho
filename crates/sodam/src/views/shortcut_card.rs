@@ -273,28 +273,6 @@ pub(crate) fn section(root: &Root, cx: &mut Context<Root>) -> AnyElement {
         .gap(px(theme::space::XS))
         .child(
             div()
-                .text_size(theme::Text::Large.size())
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme::text())
-                .child(root.tr("快捷键")),
-        )
-        .child(
-            div()
-                .text_size(theme::Text::Small.size())
-                .text_color(theme::text_muted())
-                .child(if cfg!(target_os = "macos") {
-                    // ⌃←/⌃→ 是系统「切换桌面」的默认键，绑了也收不到。
-                    root.tr(
-                        "播放控制：系统媒体键同样可用；⌃←/⌃→ 被系统占用（切换桌面），别绑这两个",
-                    )
-                    .to_string()
-                } else {
-                    root.tr("播放控制：系统媒体键同样可用；这里绑的是应用内快捷键")
-                        .to_string()
-                }),
-        )
-        .child(
-            div()
                 .id("shortcut-card")
                 .track_focus(&root.shortcut_focus)
                 // 录制期间带上 capturing 上下文，让播放绑定让路（否则按 Space 会顺手切换播放）。

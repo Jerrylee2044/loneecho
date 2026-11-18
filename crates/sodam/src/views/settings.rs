@@ -303,7 +303,9 @@ fn eq_slider(root: &Root, slot: usize, cx: &mut Context<Root>) -> impl IntoEleme
 
 /// 设置页：音质偏好选择 + 账号信息 + 其他。
 /// 设置页 → 账户板块：头像 + 昵称/ID/VIP；未登录给「去登录」并弹二维码 modal。
-fn account_section(root: &Root, cx: &mut Context<Root>) -> AnyElement {
+/// 账号信息卡：头像 + 昵称/ID/VIP + 退出登录（未登录给「去登录」）。
+/// 设置页的页头由 views/mod.rs 框架层渲染（与「设置」标题同一行）。
+pub(crate) fn account_section(root: &Root, cx: &mut Context<Root>) -> AnyElement {
     let logged_in = !root.settings.cookie.trim().is_empty();
     let avatar_path = root
         .account
@@ -841,51 +843,25 @@ pub(crate) fn settings_view(root: &mut Root, cx: &mut Context<Root>) -> AnyEleme
     if root.settings_section == SettingsSection::About {
         root.ensure_contributors(cx);
     }
+    // 页头（「设置」标题 + 账号卡）由 views/mod.rs 的框架层统一渲染，
+    // 这里只负责中栏菜单 + 右栏三级配置页。
     div()
         .flex()
-        .flex_col()
+        .flex_row()
         .flex_1()
         .min_h(px(0.0))
         .gap(px(theme::space::LG))
-        // 页头行：左侧「设置」标题（与中栏菜单同宽），右侧账号卡通栏——
-        // 账号信息在任意分类下都常驻可见。
+        .child(settings_menu(root, cx))
         .child(
             div()
+                .id("settings-scroll")
                 .flex()
-                .flex_row()
-                .items_start()
-                .gap(px(theme::space::LG))
-                .child(div().w(px(230.0)).flex_none().child(page_header(
-                    root.tr("设置"),
-                    Some(root.tr("管理账号、外观与播放").to_string()),
-                )))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .child(account_section(root, cx)),
-                ),
-        )
-        // 主体行：中栏二级菜单 + 右栏三级配置页（独立滚动）。
-        .child(
-            div()
-                .flex()
-                .flex_row()
+                .flex_col()
                 .flex_1()
+                .min_w(px(0.0))
                 .min_h(px(0.0))
-                .gap(px(theme::space::LG))
-                .child(settings_menu(root, cx))
-                .child(
-                    div()
-                        .id("settings-scroll")
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .min_h(px(0.0))
-                        .overflow_y_scroll()
-                        .child(settings_page(root, cx)),
-                ),
+                .overflow_y_scroll()
+                .child(settings_page(root, cx)),
         )
         .into_any_element()
 }

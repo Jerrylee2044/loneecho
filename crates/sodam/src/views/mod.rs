@@ -1222,7 +1222,31 @@ pub fn render(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> impl 
                 } else {
                     root.nav_display_label(root.nav)
                 };
-                this.child(page_header(&title, &subtitle_for(root)))
+                if root.nav == Nav::Settings {
+                    // 设置页：页头右侧常驻账号卡（与「设置」标题同一行），
+                    // 账号信息在任意分类下都可见。
+                    this.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_start()
+                            .gap(px(theme::space::LG))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .child(page_header(&title, &subtitle_for(root))),
+                            )
+                            .child(
+                                div()
+                                    .w(px(420.0))
+                                    .flex_none()
+                                    .child(settings::account_section(root, cx)),
+                            ),
+                    )
+                } else {
+                    this.child(page_header(&title, &subtitle_for(root)))
+                }
             },
         )
         .child(

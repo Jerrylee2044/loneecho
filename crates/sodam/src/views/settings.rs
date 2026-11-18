@@ -337,7 +337,7 @@ pub(crate) fn account_section(root: &Root, cx: &mut Context<Root>) -> AnyElement
                 .gap(px(theme::space::XS))
                 .child(
                     div()
-                        .text_size(theme::Text::Large.size())
+                        .text_size(theme::Text::Small.size())
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme::text())
                         .child(if logged_in {

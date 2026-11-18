@@ -1236,6 +1236,7 @@ pub fn render(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> impl 
                                     .w(px(230.0))
                                     .flex_none()
                                     .h(px(64.0))
+                                    .px(px(theme::space::MD + theme::space::SM))
                                     .justify_center()
                                     .child(page_header(&title, &subtitle_for(root))),
                             )

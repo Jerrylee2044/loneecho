@@ -901,6 +901,8 @@ fn settings_menu(root: &Root, cx: &mut Context<Root>) -> AnyElement {
                 .id(gpui::ElementId::Name(
                     format!("settings-menu-{}", section.id()).into(),
                 ))
+                .mx(px(theme::space::SM))
+                .px(px(theme::space::MD))
                 .py(px(theme::space::SM))
                 .cursor_pointer()
                 .rounded(px(theme::radius::ROW))

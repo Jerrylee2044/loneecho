@@ -582,6 +582,14 @@ impl Root {
         self.persist_playback_preferences();
     }
 
+    /// 设置音效 EQ（开关 + 三段增益）。立即生效（音频线程帧边界应用）并随配置保存。
+    pub fn set_eq(&mut self, gains: sodam_core::EqGains, cx: &mut Context<Self>) {
+        self.settings.eq = gains.sanitized();
+        self.engine.set_eq(self.settings.eq);
+        self.persist_playback_preferences();
+        cx.notify();
+    }
+
     pub(crate) fn set_cache_limit_mb(&mut self, mb: u64, cx: &mut Context<Self>) {
         self.settings.audio_cache_limit_mb = mb.clamp(1024, 1024 * 1024);
         self.persist_playback_preferences();

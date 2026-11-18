@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
+use crate::eq::{EqGains, EqShared, EqSource};
 use crate::log_outlet::{log_event, LogLevel, LogTopic};
 use crate::models::TrackItem;
 use crate::session::CachedTrack;
@@ -119,6 +120,8 @@ pub struct PlaybackEngine {
     tx: Sender<Command>,
     snapshot: Arc<Mutex<PlaybackSnapshot>>,
     next_load: AtomicU64,
+    /// UI 与音频线程共享的 EQ 状态（`set_eq` 只写共享，音频线程帧边界应用）。
+    eq: Arc<EqShared>,
 }
 
 impl Default for PlaybackEngine {
@@ -129,16 +132,17 @@ impl Default for PlaybackEngine {
 
 impl PlaybackEngine {
     pub fn new() -> Self {
-        Self::with_volume(1.0)
+        Self::with_volume(1.0, EqGains::default())
     }
 
-    pub fn with_volume(saved_volume: f32) -> Self {
-        Self::with_output(saved_volume, open_output, probe_default_output_id)
+    pub fn with_volume(saved_volume: f32, eq_gains: EqGains) -> Self {
+        Self::with_output(saved_volume, eq_gains, open_output, probe_default_output_id)
     }
 
     // 单测注入故障输出与设备探测，不触碰硬件/COM；正式运行始终使用上面的真实实现。
     fn with_output(
         saved_volume: f32,
+        eq_gains: EqGains,
         open_output: impl FnMut(OutputErrors) -> OutputResult + Send + 'static,
         probe: impl FnMut() -> Option<String> + Send + 'static,
     ) -> Self {
@@ -151,9 +155,11 @@ impl PlaybackEngine {
             ..Default::default()
         }));
         let state = snapshot.clone();
+        let eq = Arc::new(EqShared::new(eq_gains));
+        let eq_for_thread = eq.clone();
         let spawned = std::thread::Builder::new()
             .name("sodam-audio".to_string())
-            .spawn(move || audio_thread(rx, state, open_output, probe));
+            .spawn(move || audio_thread(rx, state, eq_for_thread, open_output, probe));
         if let Err(err) = spawned {
             let detail = err.to_string();
             log_event(
@@ -170,6 +176,7 @@ impl PlaybackEngine {
             tx,
             snapshot,
             next_load: AtomicU64::new(1),
+            eq,
         }
     }
 
@@ -241,6 +248,15 @@ impl PlaybackEngine {
         if volume.is_finite() {
             self.send(Command::SetVolume(volume.clamp(0.0, 1.0)));
         }
+    }
+
+    /// 更新音效 EQ 参数：只写共享状态，音频线程在下一帧边界应用，当前播放不打断。
+    pub fn set_eq(&self, gains: EqGains) {
+        self.eq.set(gains);
+    }
+
+    pub fn eq(&self) -> EqGains {
+        self.eq.get()
     }
 
     /// 跳转到指定秒数（越界会被引擎裁剪到 [0, 时长]）。
@@ -359,6 +375,7 @@ fn rebuild_player_at(
     position: std::time::Duration,
     volume: f32,
     paused: bool,
+    eq: &Arc<EqShared>,
 ) -> Result<rodio::Player, String> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
@@ -377,7 +394,7 @@ fn rebuild_player_at(
     };
     let (player, source) = rodio::Player::new();
     player.set_volume(volume);
-    player.append(decoder);
+    player.append(EqSource::new(decoder, eq.clone()));
     // 先暂停再挂到 mixer，避免 seek 完成前往旧起点漏出几毫秒声音。
     player.pause();
     mixer.add(source);
@@ -498,6 +515,7 @@ impl DeviceWatcher {
 fn audio_thread(
     rx: Receiver<Command>,
     state: Arc<Mutex<PlaybackSnapshot>>,
+    eq: Arc<EqShared>,
     mut open_output: impl FnMut(OutputErrors) -> OutputResult,
     mut probe: impl FnMut() -> Option<String>,
 ) {
@@ -583,6 +601,7 @@ fn audio_thread(
                     &mut watchdog,
                     &state,
                     &stream_error,
+                    &eq,
                     &mut open_output,
                 );
             }
@@ -643,7 +662,7 @@ fn audio_thread(
                 let new_player = rodio::Player::connect_new(device.mixer());
                 let volume = state.lock().map(|snap| snap.volume).unwrap_or(1.0);
                 new_player.set_volume(volume);
-                new_player.append(decoder);
+                new_player.append(EqSource::new(decoder, eq.clone()));
                 new_player.play();
                 if let Ok(mut snap) = state.lock() {
                     snap.load_seq = sequence;
@@ -752,7 +771,7 @@ fn audio_thread(
                     mark_seek_failed(&state, message);
                     continue;
                 };
-                match rebuild_player_at(device.mixer(), &path, target, volume, paused) {
+                match rebuild_player_at(device.mixer(), &path, target, volume, paused, &eq) {
                     Ok(rebuilt) => {
                         player = Some(rebuilt);
                         watchdog = OutputWatchdog::new(std::time::Instant::now());
@@ -786,6 +805,8 @@ fn audio_thread(
 ///
 /// 打开新设备失败时**保留旧流**（例如目标设备刚好在枚举瞬间消失），
 /// 下一次轮询再试，避免一次瞬时失败把正在播的歌停掉。
+// 参数超过 clippy 阈值：这些句柄来自播放线程的局部状态，打包成 struct 只会增加拆装噪音。
+#[allow(clippy::too_many_arguments)]
 fn follow_default_output(
     output: &mut Option<rodio::MixerDeviceSink>,
     player: &mut Option<rodio::Player>,
@@ -793,6 +814,7 @@ fn follow_default_output(
     watchdog: &mut OutputWatchdog,
     state: &Arc<Mutex<PlaybackSnapshot>>,
     stream_error: &Arc<Mutex<Option<String>>>,
+    eq: &Arc<EqShared>,
     open_output: &mut impl FnMut(OutputErrors) -> OutputResult,
 ) {
     // 先把续播信息取出来，再去动旧流。
@@ -822,7 +844,7 @@ fn follow_default_output(
     let Some(device) = output.as_ref() else {
         return;
     };
-    let new_player = match rebuild_player_at(device.mixer(), &path, position, volume, paused) {
+    let new_player = match rebuild_player_at(device.mixer(), &path, position, volume, paused, eq) {
         Ok(player) => player,
         Err(err) => {
             log_engine_failure("切换音频设备后重新打开失败", &err);
@@ -949,6 +971,7 @@ mod tests {
                 ..Default::default()
             })),
             next_load: AtomicU64::new(1),
+            eq: Arc::new(EqShared::new(EqGains::default())),
         };
 
         engine.seek(10.0);
@@ -1093,6 +1116,7 @@ mod tests {
         let worker_opens = opens.clone();
         let engine = PlaybackEngine::with_output(
             0.0,
+            EqGains::default(),
             move |_| {
                 worker_opens.fetch_add(1, Ordering::SeqCst);
                 Err(rodio::DeviceSinkError::NoDevice)
@@ -1136,6 +1160,7 @@ mod tests {
             tx,
             snapshot: Arc::new(Mutex::new(PlaybackSnapshot::default())),
             next_load: AtomicU64::new(1),
+            eq: Arc::new(EqShared::new(EqGains::default())),
         };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cached.m4a");
@@ -1220,8 +1245,12 @@ mod tests {
     #[test]
     fn engine_starts_without_audio_device_and_reports_state() {
         // 确定性模拟没有音频设备：不依赖 runner 恰好未安装声卡。
-        let engine =
-            PlaybackEngine::with_output(1.0, |_| Err(rodio::DeviceSinkError::NoDevice), || None);
+        let engine = PlaybackEngine::with_output(
+            1.0,
+            EqGains::default(),
+            |_| Err(rodio::DeviceSinkError::NoDevice),
+            || None,
+        );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while engine.snapshot().error.is_empty() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(10));

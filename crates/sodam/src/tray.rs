@@ -355,7 +355,8 @@ pub fn create_status_item(
 
     let text = |key: &'static str| language.text(key).to_string();
     // 顶部那行「封面 + 艺人 – 曲名」：不参与动作，点了就开主窗口。
-    let caption_item = IconMenuItem::with_id("caption", "LoneEcho", true, None, None::<Accelerator>);
+    let caption_item =
+        IconMenuItem::with_id("caption", "LoneEcho", true, None, None::<Accelerator>);
     let toggle_item = MenuItem::with_id("toggle", text("播放"), true, None::<Accelerator>);
     let prev_item = MenuItem::with_id("prev", text("上一首"), true, None::<Accelerator>);
     let next_item = MenuItem::with_id("next", text("下一首"), true, None::<Accelerator>);

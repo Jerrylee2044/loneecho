@@ -391,6 +391,8 @@ pub struct Root {
     pub progress_track_bounds: Arc<Mutex<Option<gpui::Bounds<gpui::Pixels>>>>,
     /// 音量轨道在窗口里的位置（画布测量，鼠标事件据此换算音量）。
     pub volume_track_bounds: Arc<Mutex<Option<gpui::Bounds<gpui::Pixels>>>>,
+    /// 音效 EQ 三条滑杆（低音/中音/高音）的轨道位置，画布测量。
+    pub eq_track_bounds: [Arc<Mutex<Option<gpui::Bounds<gpui::Pixels>>>>; 3],
     /// 打开中的歌单（点卡片后展示曲目）。
     pub open_playlist: Option<(String, String, Arc<Vec<TrackItem>>)>,
     pub loading_playlist: bool,
@@ -529,7 +531,7 @@ impl Root {
         // 设置页的「详细日志」要覆盖启动就生效：日志出口在 `main` 里已建好，
         // 这里补上开关状态（环境变量那一路已在出口初始化时读过，两者取并集）。
         log_outlet::set_global_detailed(settings.detailed_logs);
-        let engine = PlaybackEngine::with_volume(settings.volume);
+        let engine = PlaybackEngine::with_volume(settings.volume, settings.eq);
         settings.volume = engine.snapshot().volume;
         // 首次运行就把配置落盘：用户可以直接编辑 ~/.config/sodam/config.json
         // 换签名服务 / 钉死设备指纹（默认值已内置，见 sodam_core::config）
@@ -706,6 +708,7 @@ impl Root {
             ),
             progress_track_bounds: Arc::new(Mutex::new(None)),
             volume_track_bounds: Arc::new(Mutex::new(None)),
+            eq_track_bounds: [(); 3].map(|_| Arc::new(Mutex::new(None))),
             prefetch_inflight: HashSet::new(),
             prefetch_cooldown_since: HashMap::new(),
             prefetch_patrol: 0,

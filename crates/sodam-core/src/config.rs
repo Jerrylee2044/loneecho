@@ -33,6 +33,9 @@ pub struct Settings {
     /// 当前音量与静音前音量（0..=1）。旧配置缺字段时沿用 100%。
     pub volume: f32,
     pub volume_before_mute: f32,
+    /// 音效均衡器（三段 EQ：低音/中音/高音，±12 dB）。默认关闭、全零。
+    #[serde(default)]
+    pub eq: crate::eq::EqGains,
     /// 播放模式：列表循环 / 单曲循环 / 随机播放。旧配置缺字段时用列表循环。
     #[serde(default)]
     pub play_mode: crate::queue::PlayMode,
@@ -256,6 +259,7 @@ impl Default for Settings {
             quality_source: crate::quality::QualitySource::Unknown,
             volume: 1.0,
             volume_before_mute: 1.0,
+            eq: crate::eq::EqGains::default(),
             play_mode: crate::queue::PlayMode::default(),
             audio_cache_limit_mb: crate::cache::DEFAULT_AUDIO_LIMIT_MB,
             search_history_enabled: true,
@@ -376,6 +380,7 @@ impl Settings {
                 1.0
             };
         self.audio_cache_limit_mb = self.audio_cache_limit_mb.clamp(1024, 1024 * 1024);
+        self.eq = self.eq.sanitized();
     }
 
     /// 搜索历史最多保留 10 条；去空白、去重，最近搜索保持在前。

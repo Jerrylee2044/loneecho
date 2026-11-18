@@ -7,6 +7,7 @@ pub mod cache;
 pub mod color;
 pub mod config;
 pub mod contributors;
+pub mod eq;
 pub mod failure;
 pub mod library;
 pub mod log_outlet;
@@ -23,6 +24,7 @@ pub mod session;
 
 pub use audio::{PlaybackEngine, PlaybackSnapshot};
 pub use config::Settings;
+pub use eq::{EqGains, EqSource};
 pub use log_outlet::{flush_global, LogLevel, LogOutlet, LogRecord, LogTopic};
 pub use models::{PlaylistItem, SceneItem, TrackItem};
 pub use play_report::PlayReporter;

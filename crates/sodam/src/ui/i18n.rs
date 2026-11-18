@@ -582,6 +582,19 @@ impl Language {
                 "Queue is empty. Search or open a playlist."
             }
             "LoneEcho" => "LoneEcho",
+            "音效（EQ）" => "Equalizer",
+            "正值增强、负值减弱；立即生效并随配置保存" => {
+                "Positive values boost, negative values cut. Applied instantly and saved."
+            }
+            "低音" => "Bass",
+            "中音" => "Mid",
+            "高音" => "Treble",
+            "开启音效" => "Enable EQ",
+            "关闭音效" => "Disable EQ",
+            "原声" => "Flat",
+            "低音增强" => "Bass Boost",
+            "流行" => "Pop",
+            "清晰人声" => "Vocal",
             "正在搜索…" => "Searching…",
             "从队列移除" => "Remove from Queue",
             "这首歌暂时没有歌词" => "No lyrics for this track",

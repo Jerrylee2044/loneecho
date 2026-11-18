@@ -3,8 +3,10 @@
 use super::*;
 use crate::app::SAVE_TEXT;
 use crate::ui::i18n::Language;
+use gpui::MouseMoveEvent;
 #[cfg(target_os = "linux")]
 use sodam_core::config::TitlebarMode;
+use sodam_core::EqGains;
 use std::sync::Arc;
 
 /// 字节 → 人类可读（KB / MB / GB）。
@@ -31,6 +33,242 @@ pub(crate) fn duration_of(seconds: i64) -> String {
     } else {
         format!("{minutes}:{secs:02}")
     }
+}
+
+/// 音效 EQ 滑杆轨道宽度与滑块直径（设置页用，比播放条的音量条宽）。
+const EQ_TRACK_W: f32 = 220.0;
+const EQ_THUMB: f32 = 11.0;
+
+/// 设置页 → 音效 EQ：总开关 + 预设 + 低音/中音/高音三段滑杆（±12 dB）。
+///
+/// 滑杆交互复用播放条音量条的「canvas 测轨道位置 + 点/拖换算」做法；
+/// 松手即写配置，音频线程在下一帧边界应用，当前播放不中断。
+fn eq_section(root: &Root, cx: &mut Context<Root>) -> AnyElement {
+    let eq = root.settings.eq;
+    let toggle_label = if eq.enabled {
+        root.tr("关闭音效")
+    } else {
+        root.tr("开启音效")
+    };
+    let presets = [
+        (root.tr("原声"), EqGains::preset_flat()),
+        (root.tr("低音增强"), EqGains::preset_bass_boost()),
+        (root.tr("流行"), EqGains::preset_pop()),
+        (root.tr("清晰人声"), EqGains::preset_vocal()),
+    ];
+    let preset_pills = presets
+        .into_iter()
+        .enumerate()
+        .map(|(index, (label, preset))| {
+            let chosen = eq == preset;
+            div()
+                .id(("eq-preset", index))
+                .h(px(theme::size::CONTROL_SM))
+                .px(px(theme::space::MD))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(theme::radius::ROW))
+                .bg(if chosen {
+                    theme::surface_selected()
+                } else {
+                    theme::surface_elevated()
+                })
+                .hover(|style| style.bg(theme::surface_hover()))
+                .cursor_pointer()
+                .text_size(theme::Text::Small.size())
+                .child(label)
+                .on_click(cx.listener(move |root, _event: &ClickEvent, _window, cx| {
+                    root.set_eq(preset, cx);
+                }))
+        })
+        .collect::<Vec<_>>();
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(theme::space::SM))
+        .child(
+            div()
+                .text_size(theme::Text::Large.size())
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme::text())
+                .child(root.tr("音效（EQ）")),
+        )
+        .child(
+            div()
+                .text_size(theme::Text::Small.size())
+                .text_color(theme::text_muted())
+                .child(root.tr("正值增强、负值减弱；立即生效并随配置保存")),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(theme::space::SM))
+                .child(
+                    div()
+                        .id("eq-toggle")
+                        .h(px(theme::size::CONTROL_SM))
+                        .px(px(theme::space::MD))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(theme::radius::ROW))
+                        .bg(if eq.enabled {
+                            theme::surface_selected()
+                        } else {
+                            theme::surface_elevated()
+                        })
+                        .hover(|style| style.bg(theme::surface_hover()))
+                        .cursor_pointer()
+                        .text_size(theme::Text::Small.size())
+                        .child(toggle_label)
+                        .on_click(cx.listener(move |root, _event: &ClickEvent, _window, cx| {
+                            let next = EqGains {
+                                enabled: !root.settings.eq.enabled,
+                                ..root.settings.eq
+                            };
+                            root.set_eq(next, cx);
+                        })),
+                )
+                .children(preset_pills),
+        )
+        .children(
+            [
+                (0, root.tr("低音")),
+                (1, root.tr("中音")),
+                (2, root.tr("高音")),
+            ]
+            .into_iter()
+            .map(|(band, label)| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(theme::space::MD))
+                    .child(
+                        div()
+                            .w(px(48.0))
+                            .text_size(theme::Text::Small.size())
+                            .text_color(theme::text())
+                            .child(label),
+                    )
+                    .child(eq_slider(root, band, cx))
+                    .child(
+                        div()
+                            .w(px(56.0))
+                            .text_size(theme::Text::Small.size())
+                            .text_color(theme::text_muted())
+                            .child(format!("{:+.0} dB", eq_gain(root, band))),
+                    )
+            }),
+        )
+        .into_any_element()
+}
+
+fn eq_gain(root: &Root, band: usize) -> f32 {
+    match band {
+        0 => root.settings.eq.bass,
+        1 => root.settings.eq.mid,
+        _ => root.settings.eq.treble,
+    }
+}
+
+/// 单段 EQ 滑杆：-12 dB（左端）～ +12 dB（右端），步进 1 dB。
+fn eq_slider(root: &Root, band: usize, cx: &mut Context<Root>) -> impl IntoElement {
+    let gain = eq_gain(root, band);
+    let range = sodam_core::eq::EQ_GAIN_RANGE_DB;
+    let ratio = ((gain + range) / (2.0 * range)).clamp(0.0, 1.0);
+    let filled = (EQ_TRACK_W - EQ_THUMB) * ratio;
+    let bounds_slot = root.eq_track_bounds[band].clone();
+    let apply = move |x: f32, root: &mut Root, cx: &mut Context<Root>| {
+        let left = bounds_slot
+            .lock()
+            .ok()
+            .and_then(|value| value.map(|rect| f32::from(rect.left())))
+            .unwrap_or(0.0);
+        let ratio = ((x - left) / EQ_TRACK_W).clamp(0.0, 1.0);
+        let db = (ratio * 2.0 * range - range).round();
+        let mut next = root.settings.eq;
+        match band {
+            0 => next.bass = db,
+            1 => next.mid = db,
+            _ => next.treble = db,
+        }
+        root.set_eq(next, cx);
+    };
+    let apply_down = apply.clone();
+    let apply_move = apply.clone();
+    let slot_for_canvas = root.eq_track_bounds[band].clone();
+
+    div()
+        .relative()
+        .flex()
+        .items_center()
+        .h(px(16.0))
+        .w(px(EQ_TRACK_W))
+        .flex_none()
+        .child(
+            div()
+                .absolute()
+                .top(px(6.5))
+                .left(px(0.0))
+                .w(px(EQ_TRACK_W))
+                .h(px(3.0))
+                .rounded(px(2.0))
+                .bg(theme::surface_hover()),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(px(6.5))
+                .left(px(0.0))
+                .w(px(filled + EQ_THUMB / 2.0))
+                .h(px(3.0))
+                .rounded(px(2.0))
+                .bg(theme::accent()),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(px((16.0 - EQ_THUMB) / 2.0))
+                .left(px(filled))
+                .size(px(EQ_THUMB))
+                .rounded_full()
+                .bg(theme::text()),
+        )
+        .child(
+            canvas(
+                move |bounds: Bounds<gpui::Pixels>, _window, _cx| {
+                    if let Ok(mut guard) = slot_for_canvas.lock() {
+                        *guard = Some(bounds);
+                    }
+                },
+                |_bounds, _state, _window, _cx| {},
+            )
+            .absolute()
+            .size_full(),
+        )
+        .child(
+            div()
+                .id(("eq-track", band))
+                .absolute()
+                .size_full()
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |root, event: &MouseDownEvent, _window, cx| {
+                        apply_down(f32::from(event.position.x), root, cx);
+                    }),
+                )
+                .on_mouse_move(
+                    cx.listener(move |root, event: &MouseMoveEvent, _window, cx| {
+                        if event.pressed_button == Some(MouseButton::Left) {
+                            apply_move(f32::from(event.position.x), root, cx);
+                        }
+                    }),
+                ),
+        )
 }
 
 /// 设置页：音质偏好选择 + 账号信息 + 其他。
@@ -955,6 +1193,7 @@ pub(crate) fn settings_view(root: &mut Root, cx: &mut Context<Root>) -> AnyEleme
                 .gap(px(theme::space::XS))
                 .children(rows),
         )
+        .child(eq_section(root, cx))
         .child(super::shortcut_card::section(root, cx))
         .child({
             // 缓存：显示占用大小 + 一键清理（统计读后台快照，不在渲染路径扫盘）

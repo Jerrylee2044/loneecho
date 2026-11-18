@@ -66,14 +66,15 @@ fn effects_presets_card(root: &Root, cx: &mut Context<Root>) -> AnyElement {
                 .items_center()
                 .justify_center()
                 .rounded(px(theme::radius::ROW))
-                .bg(if chosen {
-                    theme::surface_selected()
-                } else {
-                    theme::surface_elevated()
-                })
+                .bg(theme::surface_elevated())
                 .hover(|style| style.bg(theme::surface_hover()))
                 .cursor_pointer()
                 .text_size(theme::Text::Small.size())
+                .text_color(if chosen {
+                    theme::accent()
+                } else {
+                    theme::text()
+                })
                 .child(label)
                 .on_click(cx.listener(move |root, _event: &ClickEvent, _window, cx| {
                     root.set_eq(*preset, cx);
@@ -503,7 +504,6 @@ fn window_controls_section(root: &Root, cx: &mut Context<Root>) -> Option<AnyEle
             .py(px(theme::space::SM))
             .rounded(px(theme::radius::ROW))
             .cursor_pointer()
-            .when(chosen, |this| this.bg(theme::surface_selected()))
             .hover(|style| style.bg(theme::surface_hover()))
             .on_click(cx.listener(move |root, _event: &ClickEvent, _window, cx| {
                 root.settings.titlebar = mode.key().to_string();
@@ -979,7 +979,6 @@ fn theme_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
             .py(px(theme::space::SM))
             .rounded(px(theme::radius::ROW))
             .cursor_pointer()
-            .when(chosen, |this| this.bg(theme::surface_selected()))
             .hover(|style| style.bg(theme::surface_hover()))
             .on_click(
                 cx.listener(move |root, _event: &ClickEvent, _window, cx| match value {
@@ -1065,7 +1064,6 @@ fn language_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
             .py(px(theme::space::SM))
             .rounded(px(theme::radius::ROW))
             .cursor_pointer()
-            .when(chosen, |this| this.bg(theme::surface_selected()))
             .hover(|style| style.bg(theme::surface_hover()))
             .on_click(cx.listener(move |root, _event: &ClickEvent, _window, cx| {
                 match value {
@@ -1225,7 +1223,6 @@ fn quality_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
                 .py(px(theme::space::SM))
                 .rounded(px(theme::radius::ROW))
                 .cursor_pointer()
-                .when(chosen, |this| this.bg(theme::surface_selected()))
                 .hover(|style| style.bg(theme::surface_hover()))
                 .on_click(cx.listener(move |root, _event: &ClickEvent, _window, cx| {
                     root.set_quality(&value, cx);
@@ -1377,14 +1374,15 @@ fn cache_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
                 .items_center()
                 .justify_center()
                 .rounded(px(theme::radius::ROW))
-                .bg(if is_selected {
-                    theme::surface_selected()
-                } else {
-                    theme::surface_elevated()
-                })
+                .bg(theme::surface_elevated())
                 .hover(|style| style.bg(theme::surface_hover()))
                 .cursor_pointer()
                 .text_size(theme::Text::Small.size())
+                .text_color(if is_selected {
+                    theme::accent()
+                } else {
+                    theme::text()
+                })
                 .child(label)
                 .on_click(cx.listener(move |root, _event: &ClickEvent, _window, cx| {
                     if !root.batch_upgrading {
@@ -1547,14 +1545,15 @@ fn cache_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
                                 .items_center()
                                 .justify_center()
                                 .rounded(px(theme::radius::ROW))
-                                .bg(if root.settings.audio_cache_limit_mb == limit {
-                                    theme::surface_selected()
-                                } else {
-                                    theme::surface_elevated()
-                                })
+                                .bg(theme::surface_elevated())
                                 .hover(|style| style.bg(theme::surface_hover()))
                                 .cursor_pointer()
                                 .text_size(theme::Text::Small.size())
+                                .text_color(if root.settings.audio_cache_limit_mb == limit {
+                                    theme::accent()
+                                } else {
+                                    theme::text()
+                                })
                                 .child(label)
                                 .on_click(cx.listener(
                                     move |root, _event: &ClickEvent, _window, cx| {

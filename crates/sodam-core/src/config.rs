@@ -264,13 +264,6 @@ pub const DEFAULT_SIGNER_URL: &str = "https://signer.lingchuanbio.com/sign";
 /// 上面那台服务的 token（等同取流能力，别外传；换服务时在设置里替换）。
 pub const DEFAULT_SIGNER_TOKEN: &str = "b356ad402bc31ee9e5a99cfdbf41eaa39961a562251c3359";
 
-/// 换服务前的那台内置实例，2026-10 起已下线。
-/// 老版本的默认值会落进 config.json，所以读取时要把它们迁到当前默认值，
-/// 否则老用户会一直指着一台死掉的服务。
-
-/// 上一版的内置实例（明文 HTTP，transition 期仍对老客户端开放）。
-/// 读取到它时只把地址换成当前默认值，token 不变。
-
 /// Linux 下自绘窗口控制按钮（标题栏）的策略。
 ///
 /// 不同桌面对 xdg-decoration 的回答差别很大：

@@ -398,6 +398,8 @@ pub(crate) fn account_section(root: &Root, cx: &mut Context<Root>) -> AnyElement
                 div()
                     .id("logout")
                     .flex_none()
+                    // 行整体垂直居中, 但圆形按钮视觉偏上: 下移与昵称文字顶对齐
+                    .mt(px(3.0))
                     .flex()
                     .items_center()
                     .justify_center()

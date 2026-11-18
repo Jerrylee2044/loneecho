@@ -858,22 +858,9 @@ pub(crate) fn settings_view(root: &mut Root, cx: &mut Context<Root>) -> AnyEleme
                 .min_h(px(0.0))
                 .overflow_y_scroll()
                 .child(
-                    // 页头行：左侧「设置」标题，右侧常驻账号卡（任意分类下都可见）。
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_start()
-                        .gap(px(theme::space::LG))
-                        .child(div().flex_1().min_w(px(0.0)).child(page_header(
-                            root.tr("设置"),
-                            Some(root.tr("管理账号、外观与播放").to_string()),
-                        )))
-                        .child(
-                            div()
-                                .w(px(380.0))
-                                .flex_none()
-                                .child(account_section(root, cx)),
-                        ),
+                    // 页头：账号卡通栏横在内容区顶部，任意分类下常驻可见；
+                    // 「设置」标题由中栏菜单卡片提供，这里不再重复。
+                    account_section(root, cx),
                 )
                 .child(settings_page(root, cx)),
         )

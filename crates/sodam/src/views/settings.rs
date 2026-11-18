@@ -320,15 +320,16 @@ pub(crate) fn account_section(root: &Root, cx: &mut Context<Root>) -> AnyElement
         .flex_row()
         .items_center()
         .gap(px(theme::space::LG))
-        .p(px(theme::space::LG))
+        .px(px(theme::space::LG))
+        .py(px(theme::space::SM))
         .rounded(px(theme::radius::CARD))
         .bg(theme::surface_elevated())
         .border_1()
         .border_color(theme::border())
         .child(if logged_in {
-            cover(avatar_path, 64.0, 999.0)
+            cover(avatar_path, 48.0, 999.0)
         } else {
-            cover(None, 64.0, 999.0)
+            cover(None, 48.0, 999.0)
         })
         .child(
             div()

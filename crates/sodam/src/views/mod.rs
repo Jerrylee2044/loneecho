@@ -1224,17 +1224,19 @@ pub fn render(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> impl 
                 };
                 if root.nav == Nav::Settings {
                     // 设置页：页头右侧常驻账号卡（与「设置」标题同一行），
-                    // 账号信息在任意分类下都可见。
+                    // 两侧固定 64px 等高对齐；账号信息在任意分类下都可见。
                     this.child(
                         div()
                             .flex()
                             .flex_row()
-                            .items_start()
+                            .items_center()
                             .gap(px(theme::space::LG))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w(px(0.0))
+                                    .h(px(64.0))
+                                    .justify_center()
                                     .child(page_header(&title, &subtitle_for(root))),
                             )
                             .child(

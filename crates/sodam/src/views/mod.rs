@@ -1212,9 +1212,10 @@ pub fn render(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> impl 
         .p(px(theme::space::XL))
         .gap(px(theme::space::LG))
         .when(
+            // 设置页的页头由设置视图自己布局（顶部账号条），不套框架页头。
             !matches!(
                 root.nav,
-                Nav::Lyrics | Nav::Search | Nav::Artist | Nav::Album
+                Nav::Lyrics | Nav::Search | Nav::Artist | Nav::Album | Nav::Settings
             ),
             |this| {
                 let title = if root.nav == Nav::Scenes {
@@ -1222,34 +1223,7 @@ pub fn render(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> impl 
                 } else {
                     root.nav_display_label(root.nav)
                 };
-                if root.nav == Nav::Settings {
-                    // 设置页：页头右侧常驻账号卡（与「设置」标题同一行），
-                    // 两侧固定 64px 等高对齐；账号信息在任意分类下都可见。
-                    this.child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(theme::space::LG))
-                            .child(
-                                div()
-                                    .w(px(170.0))
-                                    .flex_none()
-                                    .h(px(64.0))
-                                    .px(px(theme::space::MD + theme::space::SM))
-                                    .justify_center()
-                                    .child(page_header(&title, &subtitle_for(root))),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .child(settings::account_section(root, cx)),
-                            ),
-                    )
-                } else {
-                    this.child(page_header(&title, &subtitle_for(root)))
-                }
+                this.child(page_header(&title, &subtitle_for(root)))
             },
         )
         .child(

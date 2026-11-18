@@ -7,8 +7,8 @@ mod search_actions;
 
 use gpui::prelude::*;
 use gpui::{
-    div, px, Context, Decorations, EntityInputHandler, FocusHandle, Image, Render, UTF16Selection,
-    Window,
+    div, px, svg, ClickEvent, Context, Decorations, EntityInputHandler, FocusHandle, Image, Render,
+    UTF16Selection, Window,
 };
 use sodam_core::{
     failure::UnplayableTracks,
@@ -1723,7 +1723,35 @@ impl Render for Root {
             // 标题栏覆盖在各面板背景之上；不再单独占一行而截断侧栏底色。
             // 放在普通内容之后、弹层之前，控制按钮可点击，弹层仍能覆盖标题栏。
             .when(own_titlebar, |this| {
-                this.child(ui::titlebar::render(window, &titlebar_anchor))
+                // 设置入口：纯齿轮图标，放在「−」左边；当前在设置页时图标着色。
+                let settings_gear = div()
+                    .id("titlebar-settings")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(44.0))
+                    .h(px(ui::titlebar::STRIP_HEIGHT))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme::surface_hover()))
+                    .child(
+                        svg()
+                            .path(crate::ui::icons::path("settings"))
+                            .size(px(14.0))
+                            .text_color(if self.nav == Nav::Settings {
+                                theme::accent()
+                            } else {
+                                theme::text_muted()
+                            }),
+                    )
+                    .on_click(cx.listener(|root, _event: &ClickEvent, _window, cx| {
+                        root.set_nav(Nav::Settings, cx);
+                    }))
+                    .into_any_element();
+                this.child(ui::titlebar::render(
+                    window,
+                    &titlebar_anchor,
+                    Some(settings_gear),
+                ))
             })
             .when(self.track_menu.is_some(), |this| {
                 this.child(crate::views::track_menu(self, cx))

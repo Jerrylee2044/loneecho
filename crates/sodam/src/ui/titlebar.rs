@@ -45,8 +45,8 @@ pub type DragAnchor = Rc<Cell<Option<Point<Pixels>>>>;
 /// 覆盖在窗口顶部，不占布局高度：侧边栏/内容列各自为控件留出空间，
 /// 背景仍延伸到标题栏下方，避免独立标题栏横条与面板之间出现色差。
 /// 左侧全部为拖拽区，右侧是三个窗口控制按钮。
-pub fn render(window: &Window, anchor: &DragAnchor) -> Div {
-    render_with_maximize_icon(maximize_icon(window.is_maximized()), anchor)
+pub fn render(window: &Window, anchor: &DragAnchor, leading: Option<gpui::AnyElement>) -> Div {
+    render_with_maximize_icon(maximize_icon(window.is_maximized()), anchor, leading)
 }
 
 /// 最大化后按钮换成「还原」图标，和系统窗口的语义一致。
@@ -59,7 +59,11 @@ fn maximize_icon(is_maximized: bool) -> &'static str {
 }
 
 /// 与真实 `Window` 解耦：单测不必构造平台窗口，也能覆盖普通/最大化两条分支。
-fn render_with_maximize_icon(maximize_icon: &'static str, anchor: &DragAnchor) -> Div {
+fn render_with_maximize_icon(
+    maximize_icon: &'static str,
+    anchor: &DragAnchor,
+    leading: Option<gpui::AnyElement>,
+) -> Div {
     div()
         .absolute()
         .top(px(0.0))
@@ -71,6 +75,8 @@ fn render_with_maximize_icon(maximize_icon: &'static str, anchor: &DragAnchor) -
         .h(px(STRIP_HEIGHT))
         .flex_none()
         .child(drag_area(anchor.clone()))
+        // 设置齿轮等应用按钮: 与窗口控制按钮同为拖拽区的兄弟节点。
+        .when_some(leading, |this, button| this.child(button))
         .child(caption_button(
             "titlebar-min",
             "minus",
@@ -203,7 +209,7 @@ mod tests {
 
     #[test]
     fn titlebar_overlays_panel_backgrounds_without_its_own_fill() {
-        let mut titlebar = render_with_maximize_icon(maximize_icon(false), &test_anchor());
+        let mut titlebar = render_with_maximize_icon(maximize_icon(false), &test_anchor(), None);
         let style = titlebar.style();
         assert_eq!(style.position, Some(gpui::Position::Absolute));
         assert_eq!(style.inset.top, Some(px(0.0).into()));
@@ -243,7 +249,7 @@ mod tests {
         assert_eq!(maximize_icon(true), "restore");
         // 两条分支都必须能构建出同高度的覆盖层。
         for icon in ["square", "restore"] {
-            let mut titlebar = render_with_maximize_icon(icon, &test_anchor());
+            let mut titlebar = render_with_maximize_icon(icon, &test_anchor(), None);
             assert_eq!(titlebar.style().size.height, Some(px(STRIP_HEIGHT).into()));
         }
     }

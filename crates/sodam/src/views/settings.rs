@@ -857,8 +857,7 @@ pub(crate) fn settings_view(root: &mut Root, cx: &mut Context<Root>) -> AnyEleme
     if root.settings_section == SettingsSection::About {
         root.ensure_contributors(cx);
     }
-    // 页头（「设置」标题 + 账号卡）由 views/mod.rs 的框架层统一渲染，
-    // 这里只负责中栏菜单 + 右栏三级配置页。
+    // 无「设置」页头：账号条常驻右栏顶部（通栏），其下是三级配置页（独立滚动）。
     div()
         .flex()
         .flex_row()
@@ -868,14 +867,23 @@ pub(crate) fn settings_view(root: &mut Root, cx: &mut Context<Root>) -> AnyEleme
         .child(settings_menu(root, cx))
         .child(
             div()
-                .id("settings-scroll")
                 .flex()
                 .flex_col()
                 .flex_1()
                 .min_w(px(0.0))
                 .min_h(px(0.0))
-                .overflow_y_scroll()
-                .child(settings_page(root, cx)),
+                .gap(px(theme::space::LG))
+                .child(account_section(root, cx))
+                .child(
+                    div()
+                        .id("settings-scroll")
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .overflow_y_scroll()
+                        .child(settings_page(root, cx)),
+                ),
         )
         .into_any_element()
 }

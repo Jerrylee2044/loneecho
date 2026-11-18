@@ -149,10 +149,16 @@ pub fn render(root: &Root, cx: &mut Context<Root>, own_titlebar: bool) -> impl I
             nav_row(nav, labels[&nav].clone(), active, cx)
         })
         .collect();
-    let footer_items: Vec<AnyElement> = [Nav::Settings]
-        .into_iter()
-        .map(|nav| nav_row(nav, labels[&nav].clone(), nav == current, cx))
-        .collect();
+    // 设置入口移到自绘标题栏（齿轮图标）。macOS 用系统红绿灯、没有自绘标题栏，
+    // 保留侧栏入口，否则 macOS 上没有进设置页的路。
+    let footer_items: Vec<AnyElement> = if cfg!(target_os = "macos") {
+        [Nav::Settings]
+            .into_iter()
+            .map(|nav| nav_row(nav, labels[&nav].clone(), nav == current, cx))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     div()
         .flex()

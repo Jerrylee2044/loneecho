@@ -76,6 +76,7 @@ impl Language {
             "登录成功" => "Signed in",
             "已过期" => "Expired",
             "失败" => "Failed",
+            "正在保存…" => "Saving…",
             "已配置登录与签名服务，可以去「搜索」或「推荐」了" => "Signed in and signer ready. Try Discover or Search.",
             "还没配好：请在「设置」里填 Cookie 与签名服务地址（或设 SODA_COOKIE / QISHUI_SIGNER_URL）" => "Not ready: set Cookie and signer URL in Settings (or use SODA_COOKIE / QISHUI_SIGNER_URL).",
             "推荐队列" => "Recommendation queue",
@@ -128,6 +129,13 @@ impl Language {
             "歌单「{}」没有可播放曲目" => "Playlist {} has no playable tracks",
             "推荐队列已追加 {added} 首" => "Added {} recommendation tracks",
             "已退出登录" => "Signed out",
+            "正在退出登录…" => "Signing out…",
+            "已退出登录；要彻底退出请取消环境变量 SODA_COOKIE，否则重启会重新登录" => {
+                "Signed out. Unset SODA_COOKIE to stay signed out; next launch signs back in."
+            }
+            "退出登录失败，账号仍保持登录；检查配置文件能否写入后重试。" => {
+                "Sign-out failed; you are still signed in. Check that the config file is writable, then try again."
+            }
             "已收藏：{}" => "Liked: {}",
             "已取消收藏：{}" => "Unliked: {}",
             "已入队：{title}" => "Queued: {title}",
@@ -163,6 +171,8 @@ impl Language {
             "这首在你的账号下没有整曲。" => "Your account doesn't have the full track.",
             "这首当前取不到，已跳过。" => "This track isn't available right now. Skipped.",
             "这首当前取不到。" => "This track isn't available right now.",
+            "这首的音频解不开，已跳过。" => "This track's audio can't be decoded. Skipped.",
+            "这首的音频解不开。" => "This track's audio can't be decoded.",
             "本地缓存写入失败，检查磁盘空间。" => "Cache write failed. Check disk space.",
             "打开验证窗口失败，请改用官方客户端导出 Cookie。" => {
                 "Couldn't open the verification window. Export your cookie from the official app instead."
@@ -350,7 +360,7 @@ impl Language {
             "签名服务：{}" => "Signer: {}",
             "（未配置）" => "(not configured)",
             "配置：{}" => "Config: {}",
-            "Edit" => "Edit",
+            "编辑" => "Edit",
             "GitHub: {}" => "GitHub: {}",
             "Author: ZephyrCheung" => "Author: ZephyrCheung",
             "歌手" => "Artist",
@@ -387,6 +397,16 @@ impl Language {
             "没有可用歌词" => "No lyrics available",
             "正在读取歌词…" => "Loading lyrics…",
             "设置已保存" => "Settings saved",
+            "配置文件已更新，改动已生效" => "Config file updated; changes are now live.",
+            "配置文件解析失败（{}）：已保留当前设置，未改动文件" => {
+                "Failed to parse the config file ({}). Current settings kept; file untouched."
+            }
+            "配置文件损坏，已从备份恢复；坏文件保留在 {}" => {
+                "Config file was corrupt; recovered from backup. The broken file is saved at {}."
+            }
+            "配置文件损坏（{}）：已用默认设置启动，原文件未改动" => {
+                "Config file is corrupt ({}): started with defaults. The original file was left untouched."
+            }
             "已配置登录与签名服务，可以去「搜索」或「推荐」了" => "Signed in and signer ready. Try Discover or Search.",
             "还没配好：请在「设置」里填 Cookie 与签名服务地址（或设 SODA_COOKIE / QISHUI_SIGNER_URL）" => "Not ready: set Cookie and signer URL in Settings (or use SODA_COOKIE / QISHUI_SIGNER_URL).",
             "推荐队列" => "Recommendation queue",
@@ -562,6 +582,15 @@ impl Language {
             "登录成功，正在读取账号信息…" => "Signed in. Loading account…",
             "登录成功（会话未初始化）" => "Signed in (session not initialized)",
             "二维码已过期，正在自动换新码…" => "QR code expired. Refreshing…",
+            "二维码有效期未知" => "QR expiry unavailable",
+            "二维码剩余 {} 分 {} 秒" => "QR code expires in {}m {}s",
+            "二维码剩余 {} 秒" => "QR code expires in {}s",
+            "验证窗口已打开；完成后这里会自动更新" => {
+                "Verification window opened; this view updates when it completes."
+            }
+            "需要二次验证，正在打开验证窗口…" => {
+                "Second verification required. Opening the verification window…"
+            }
             "还没有正在播放的歌曲" => "No song is playing",
             "正在读取听歌模式…" => "Loading listening modes…",
             "正在加载更多探索歌单…" => "Loading more discovery playlists…",

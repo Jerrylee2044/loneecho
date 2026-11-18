@@ -3,13 +3,16 @@
 //! [`Root`] 的字段定义在 [`super`]，这里按领域拆分实现，避免单文件继续膨胀。
 
 use crate::ui::i18n::Language;
+use crate::ui::middle_drag::DragTarget;
 use crate::ui::theme::{self, ThemeKind};
 use gpui::prelude::*;
 use gpui::{Context, Window};
 use sodam_core::audio::PlaybackSnapshot;
+use sodam_core::config::EnvCookieFill;
 use sodam_core::failure::{PlayBudget, PlaybackFailure, RecoveryAction, Stage, UnplayableReason};
 use sodam_core::library::RecommendationSource;
 use sodam_core::log_outlet::{self, log_event, LogLevel, LogTopic};
+use sodam_core::login::LoginStatus;
 use sodam_core::models::{LyricLine, PlaylistItem, SceneItem, TrackItem};
 use sodam_core::playback_trace::{drive_play_attempt, PlaybackTrace};
 use sodam_core::prefetch::{is_global_failure, SuspensionClass};
@@ -20,8 +23,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::{
-    status_label, BatchUpgradeProgress, LoginState, Nav, QueueOrigin, Root, REMOTE_TEXT,
-    RETRY_TEXT, ROW_BATCH, SAVE_TEXT,
+    apply_verify_window_result, status_label, verify_window_step, BatchUpgradeProgress, LoginState,
+    Nav, QueueOrigin, Root, VerifyWindowState, VerifyWindowStep, REMOTE_TEXT, RETRY_TEXT,
+    ROW_BATCH, SAVE_TEXT,
 };
 use sodam_core::queue::{PlayMode, Queue};
 
@@ -29,8 +33,17 @@ impl Root {
     /// 设置页贡献者墙：用 contrib.rocks 的组合图，后台拉取并缓存在内存。
     ///
     /// 不用 GitHub API，因此没有 token / 请求配额问题；贡献者增减由服务自动更新。
-    pub fn ensure_contributors(&mut self, cx: &mut Context<Self>) {
-        if self.contributors_image.is_some() || self.contributors_fetching {
+    ///
+    /// `force` 只在用户点击「重试」时为 true；渲染路径一律传 false。
+    /// 失败态由 `sodam_core::contributors::should_fetch_contributors` 判定是否停手，
+    /// 避免「失败 → notify → 重绘 → 再拉取」的死循环（#135 C）。
+    pub fn ensure_contributors(&mut self, cx: &mut Context<Self>, force: bool) {
+        if !sodam_core::contributors::should_fetch_contributors(
+            self.contributors_image.is_some(),
+            self.contributors_fetching,
+            self.contributors_failed,
+            force,
+        ) {
             return;
         }
         self.contributors_failed = false;
@@ -779,19 +792,35 @@ impl Root {
                 }
             };
             let token = created.token.clone();
+            let expires_at = created.expire_time;
             let _ = this.update(cx, |root, cx| {
                 root.login = LoginState::Waiting {
                     matrix,
                     token: token.clone(),
                     status: language.text("等待扫码…").to_string(),
+                    expires_at,
+                    need_second_verify: false,
+                    verify_window: VerifyWindowState::NotRequested,
                 };
                 root.set_status_text(language.text("请用汽水音乐 App 扫码并确认").to_string());
                 cx.notify();
             });
+            let expires_at_text = expires_at.to_string();
+            log_event(
+                LogLevel::Info,
+                LogTopic::App,
+                "login_qr_created",
+                &[("expires_at", expires_at_text.as_str())],
+            );
 
             // 轮询：libresoda 内部有 2.5s 最小间隔 + 5s 限流冷却，这里 3s 一次足够温和
-            // 二次验证窗口只自动拉起一次（误关可重试登录流程）；完成后轮询自动领取结果
-            let mut verify_window_opened = false;
+            // 二次验证窗口只自动拉起一次（失败也不重试，用户可关掉重开登录流程）；
+            // 完成后轮询自动领取结果
+            let mut verify_window = VerifyWindowState::NotRequested;
+            let opened_text = language
+                .text("验证窗口已打开；完成后这里会自动更新")
+                .to_string();
+            let mut last_login_phase = String::new();
             for _ in 0..80 {
                 // 6 秒一次：3 秒会触发服务端限流（error_code=7），确认握手会被丢掉
                 cx.background_executor()
@@ -810,8 +839,16 @@ impl Root {
                             // 先记原文、先取文案：下面要对 root.login 取可变借用。
                             root.log_failure("登录轮询异常", &err);
                             let status_text = root.tr(RETRY_TEXT).to_string();
-                            if let LoginState::Waiting { status, .. } = &mut root.login {
-                                *status = status_text;
+                            if let LoginState::Waiting {
+                                status,
+                                verify_window,
+                                ..
+                            } = &mut root.login
+                            {
+                                // 验证窗口打开失败的原因留着：一次网络抖动不该把它换掉。
+                                if *verify_window != VerifyWindowState::Failed {
+                                    *status = status_text;
+                                }
                             }
                             cx.notify();
                         });
@@ -825,7 +862,52 @@ impl Root {
                 };
                 let cookie = result.cookie.trim().to_string();
                 let finished = result.is_finished();
+                let status_key = match result.status {
+                    LoginStatus::Waiting => "waiting",
+                    LoginStatus::Scanned => "scanned",
+                    LoginStatus::Success => "success",
+                    LoginStatus::Expired => "expired",
+                    LoginStatus::Failed => "failed",
+                };
+                let phase = if result.need_second_verify {
+                    "second_verify"
+                } else if result.rate_limited {
+                    "rate_limited"
+                } else if verify_window == VerifyWindowState::Opened && !finished {
+                    "second_verify_submitted"
+                } else {
+                    status_key
+                };
+                if last_login_phase != phase {
+                    log_event(
+                        LogLevel::Info,
+                        LogTopic::App,
+                        "login_poll",
+                        &[
+                            ("phase", phase),
+                            ("status", status_key),
+                            (
+                                "rate_limited",
+                                if result.rate_limited { "true" } else { "false" },
+                            ),
+                        ],
+                    );
+                    last_login_phase = phase.to_string();
+                }
                 if finished {
+                    log_event(
+                        LogLevel::Info,
+                        LogTopic::App,
+                        "login_success",
+                        &[(
+                            "second_verify",
+                            if verify_window == VerifyWindowState::Opened {
+                                "true"
+                            } else {
+                                "false"
+                            },
+                        )],
+                    );
                     let _ = this.update(cx, |root, cx| {
                         match root.session.as_mut() {
                             Some(session) => {
@@ -835,6 +917,8 @@ impl Root {
                                 match session.apply_login_cookie(&cookie) {
                                     Ok(()) => {
                                         root.settings = session.settings().clone();
+                                        // 扫码登录成功：解除登出记号，环境变量补全恢复（#192）。
+                                        root.env_cookie_opted_out = false;
                                         // 换了一份登录凭据：旧账号的不可播结论与逐曲冷却
                                         // 一并作废。账号 id / 会员状态的逐项比较在
                                         // `refresh_account` 里，但账号信息读取失败时拿不到
@@ -882,8 +966,10 @@ impl Root {
                         .await;
                 }
                 let expired = result.is_terminal_failure();
-                if result.need_second_verify && !verify_window_opened {
-                    verify_window_opened = true;
+                // 二次验证窗口只拉起一次。打开失败后保留错误文案，等用户重开登录流程
+                // （`start_login` 会重新建一份 NotRequested 的状态）。
+                let step = verify_window_step(verify_window, result.need_second_verify);
+                if step == VerifyWindowStep::Open {
                     // 自动拉起验证窗口（libresoda 会经签名页桥接官方验证组件）；
                     // 用户在窗口里完成验证后，下一次轮询会拿到登录成功
                     let open_settings = settings.clone();
@@ -891,10 +977,21 @@ impl Root {
                     let open = cx.background_spawn(async move {
                         Session::new(open_settings).open_second_verify(&open_token)
                     });
-                    let message = match open.await {
-                        Ok(_) => language
-                            .text("已打开二次验证窗口，请在其中完成验证")
-                            .to_string(),
+                    let (window_state, message) = match open.await {
+                        Ok(_) => {
+                            log_event(
+                                LogLevel::Info,
+                                LogTopic::App,
+                                "login_second_verify_opened",
+                                &[],
+                            );
+                            (
+                                VerifyWindowState::Opened,
+                                language
+                                    .text("已打开二次验证窗口，请在其中完成验证")
+                                    .to_string(),
+                            )
+                        }
                         Err(err) => {
                             // 这里没有 `root` 可借；脱敏由日志出口在写盘前统一做，
                             // 不依赖调用方是否拿得到 `root`。
@@ -905,24 +1002,55 @@ impl Root {
                                 "second_verify_open_failed",
                                 &[("detail", detail.as_str())],
                             );
-                            language
-                                .text("打开验证窗口失败，请改用官方客户端导出 Cookie。")
-                                .to_string()
+                            (
+                                VerifyWindowState::Failed,
+                                language
+                                    .text("打开验证窗口失败，请改用官方客户端导出 Cookie。")
+                                    .to_string(),
+                            )
                         }
                     };
+                    // 成功才置 Opened；失败置 Failed：下一轮不会再开窗，
+                    // 也不会把错误文案换成「已打开」。
+                    verify_window = window_state;
                     let _ = this.update(cx, |root, cx| {
-                        root.set_status_text(message);
+                        root.set_status_text(message.clone());
+                        if let LoginState::Waiting {
+                            status: slot,
+                            need_second_verify: flag,
+                            verify_window: state,
+                            ..
+                        } = &mut root.login
+                        {
+                            *flag = true;
+                            *state = window_state;
+                            *slot = message;
+                        }
                         cx.notify();
                     });
                 }
                 let _ = this.update(cx, |root, cx| {
-                    if let LoginState::Waiting { status: slot, .. } = &mut root.login {
-                        *slot = status;
+                    if let LoginState::Waiting {
+                        status: slot,
+                        need_second_verify: flag,
+                        verify_window: state,
+                        ..
+                    } = &mut root.login
+                    {
+                        apply_verify_window_result(
+                            *state,
+                            flag,
+                            slot,
+                            status,
+                            result.need_second_verify,
+                            &opened_text,
+                        );
                     }
                     cx.notify();
                 });
                 if expired {
                     // 过期就自动换一张新码（会话只有 3 分钟，用户常常来不及扫/确认）
+                    log_event(LogLevel::Warn, LogTopic::App, "login_qr_expired", &[]);
                     let _ = this.update(cx, |root, cx| {
                         root.set_status_text(
                             language.text("二维码已过期，正在自动换新码…").to_string(),
@@ -1012,13 +1140,28 @@ impl Root {
         .detach();
     }
 
+    /// 只应用主题、不保存：设置页与热重载共用这一套应用逻辑（#185）。
+    ///
+    /// 空/未识别的值回退到跟随系统；调用方自己决定要不要回写 `settings.theme`。
+    pub(crate) fn apply_theme_state(&mut self, key: &str, cx: &mut Context<Self>) {
+        match ThemeKind::from_key(key) {
+            Some(theme) => {
+                self.theme = theme;
+                self.theme_follows_system = false;
+            }
+            None => {
+                self.theme_follows_system = true;
+                self.theme = theme::theme_from_appearance(cx.window_appearance());
+            }
+        }
+        theme::set_theme(self.theme);
+    }
+
     /// 设置界面主题并写入配置；一旦手动选择，不再跟随系统。
     pub fn set_ui_theme(&mut self, theme: ThemeKind, cx: &mut Context<Self>) {
-        self.theme = theme;
-        self.theme_follows_system = false;
+        self.apply_theme_state(theme.key(), cx);
         self.settings.theme = theme.key().to_string();
         let save_result = self.settings.save();
-        theme::set_theme(theme);
         match save_result {
             Ok(()) => {
                 // 文案要过词典：状态行现在真的会显示，英文界面不能露出中文。
@@ -1042,11 +1185,9 @@ impl Root {
 
     /// 主题恢复为跟随系统：清空配置里的 theme（空串 = auto），渲染时按窗口外观取值。
     pub fn set_ui_theme_system(&mut self, cx: &mut Context<Self>) {
-        self.theme_follows_system = true;
-        self.theme = theme::theme_from_appearance(cx.window_appearance());
+        self.apply_theme_state("", cx);
         self.settings.theme = String::new();
         let save_result = self.settings.save();
-        theme::set_theme(self.theme);
         match save_result {
             Ok(()) => self.set_status_text(self.tr("主题已恢复为跟随系统")),
             Err(err) => {
@@ -1248,12 +1389,14 @@ impl Root {
         let count = common_rows + card_rows + 3;
         let columns_changed = old_columns != (columns, columns);
         if columns_changed {
+            self.finish_middle_drag_for(DragTarget::Scenes);
             self.scenes_list.reset(count);
         } else if count > self.scenes_list_items {
             let old_count = self.scenes_list_items;
             self.scenes_list
                 .splice(old_count..old_count, count - old_count);
         } else if count < self.scenes_list_items {
+            self.finish_middle_drag_for(DragTarget::Scenes);
             self.scenes_list.reset(count);
         }
         self.scenes_list_items = count;
@@ -1648,20 +1791,71 @@ impl Root {
         std::time::Duration::from_secs_f32(ms / 1000.0)
     }
 
-    /// 计算「让第 `index` 句停在视口顶部 + 80px」所需的滚动偏移。
+    /// 计算「让第 `index` 句停在歌词视口中心上方一行」所需的滚动偏移。
+    ///
+    /// 第一句特殊：不居中，改为对齐封面顶部（列表顶端），避免开头就把列表
+    /// 滚进上方留白。
+    ///
+    /// 之前是「顶部 + 80px」，高亮句会整体偏上；列表首尾各留了半个视口的
+    /// padding，所以第一句/最后一句也能滚到正中间。16px 是实测校准：
+    /// 文字行的视觉重心略低于几何中心（汉字下沉、行高上下留白不对称）。
     fn lyrics_scroll_target(&self, index: usize) -> Option<f32> {
-        const LYRIC_TOP_INSET: f32 = 80.0;
-        let bounds = self.lyrics_scroll.bounds_for_item(index)?;
-        let viewport_top = self.lyrics_scroll.bounds().top();
-        // offset 为负表示内容上移，所以取「该句顶部 - 视口顶 - 80」的相反数。
-        let distance = bounds.top() - viewport_top - gpui::px(LYRIC_TOP_INSET);
-        Some(-f32::from(distance))
+        // 对齐目标是**封面中心**：歌词视口与封面列在同一水平带内，
+        // 但歌词视口本身不居中（受窗口布局影响），直接用视口中心会偏。
+        // 封面在窗口里的垂直中心 = 播放区（窗口高 - 底部播放条）的中心。
+        let viewport = self.lyrics_scroll.bounds();
+        // 直接用滚动视口自身的中心（窗口坐标）：布局就是「左封面 + 右歌词」
+        // 在同一水平带内居中排列，视口中心即封面中心；之前的窗口高换算把
+        // 外层 padding 也算进去，反而造成固定偏移。
+        // 再向上偏一行（64px = 单句 32 + 间距 32）：官方播放页高亮句停在中线上方
+        // 一行的位置，下方能看到下一句的走势；16px 是文字视觉重心的校准。
+        const LYRIC_CENTER_OFFSET: f32 =
+            crate::views::lyrics::LYRIC_ROW_GAP + crate::views::lyrics::LYRIC_LINE_HEIGHT + 16.0;
+        let viewport_center = viewport.center().y - gpui::px(LYRIC_CENTER_OFFSET);
+        let line_center = self.lyrics_scroll.bounds_for_item(index)?.center().y;
+        // offset 为负表示内容上移：把该句中心推到视口中心上方一行。
+        let distance = line_center - viewport_center;
+        let target = -f32::from(distance);
+        // 开场规则（issue #180 讨论）：歌词列表**先不动**——高亮句随播放
+        // 一句句往下走；直到高亮句在**屏幕上**走到中线附近，才开始常规的
+        // 中线跟随滚动。判定用的是「该句在**顶端偏移**下的屏幕位置」
+        // （内容坐标 + intro_offset），不是当前滚动偏移下的位置：居中之后
+        // 高亮句恰好压在跟随线上，若按当前偏移判定会翻转回顶端目标，
+        // 两个目标间来回振荡（实测踩过）。顶端偏移是常量，判定结果与
+        // 当前滚动无关，每句的结论恒定。
+        // 顶端偏移：把第一句顶部推到视口顶部（滚掉列表的半屏 padding）。
+        let first_top = self.lyrics_scroll.bounds_for_item(0)?.top();
+        let intro_offset = f32::from(viewport.top() - first_top);
+        // 「还在开场」的判定必须只依赖**内容几何**（每句的固定位置），不能依赖
+        // 当前偏移：居中之后高亮句的屏幕位置恰好压在跟随线上，若用屏幕位置
+        // 判定会在「顶端 ↔ 居中」两个目标间来回翻转（实测上下振荡）。
+        // 用「该句在顶端偏移下的屏幕位置是否已越过跟随线」则与偏移无关，
+        // 每句的判定结果恒定，越过线后自然切到居中跟随。
+        let intro_screen_center = line_center + gpui::px(intro_offset);
+        // 目标必须夹进**实际可滚动的范围**：短歌词（尤其只有几句）的尾部
+        // 达不到理想目标时，偏移会被 gpui 钳在最大滚动量上，补间永远差一截，
+        // 每帧都会重新起补间（表现为结尾句反复小幅抖动）。钳位后补间能落到
+        // 终点，动画自然收敛。顶端目标同样钳位，保证开场判定与实际一致。
+        // 可滚动范围直接用 gpui 量好的 `max_offset()`：它包含列表上下 padding。
+        // 自己拿首尾句拼范围会漏掉 padding，把所有目标都钳成 0，歌词完全不滚
+        // （实测踩过：0be11d2 的回归）。
+        let max_scroll = f32::from(self.lyrics_scroll.max_offset().y).max(0.0);
+        let clamp_to_range = |value: f32| value.clamp(-max_scroll, 0.0);
+        // 第一句始终用顶端目标：折行成长句时首句中心在顶端偏移下会低于跟随线，
+        // 走几何判定会把它滚出视口顶端，截掉句首。
+        if index == 0 {
+            return Some(clamp_to_range(intro_offset));
+        }
+        if intro_screen_center <= viewport_center {
+            return Some(clamp_to_range(intro_offset));
+        }
+        Some(clamp_to_range(target))
     }
 
     /// 把歌词滚到指定句，**走过渡动画**。
     ///
-    /// 定位沿用之前的行为：当前句顶部落在视口顶部往下 80px 处（`offsetTop - 80`），
-    /// 不做垂直居中。列表顶部留了半屏空白，所以首句也能停在这个位置。
+    /// 定位：当前句的**垂直中心**对齐歌词视口中心（issue #180）。列表顶部
+    /// 留了半屏空白，所以首句也能停在视口中间；不再使用顶部固定 80px 的偏上位置。
     ///
     /// 布局还没就绪时（切歌、拖动进度后的第一帧）记下目标句，由下一帧的
     /// `flush_pending_lyrics_scroll` 补上，避免歌词停在上一首的位置。
@@ -2111,18 +2305,136 @@ impl Root {
         self.clear_round_exhaustion();
     }
 
-    /// 退出登录：清除 Cookie 并立即回到未登录状态。
+    /// 退出登录：落盘成功后清除 Cookie 并回到未登录状态；落盘失败保持登录。
     ///
     /// 播放和队列一并停止，避免旧账号的歌单/收藏继续留在界面上；
     /// 封面本地缓存只按 URL 索引，可以复用，不涉及凭据。
+    ///
+    /// 落盘放后台线程：磁盘慢或写锁被占时界面不跟着卡（#197）。
     pub fn logout(&mut self, cx: &mut Context<Self>) {
-        let mut settings = self.settings.clone();
-        settings.cookie.clear();
+        // 落盘期间再点只算一次：不起第二个保存，也不把状态清理跑两遍。
+        // 正在排队退出时也不接新的登出：退出流程只等它开始那一刻已有的保存，
+        // 这时候再起一个新保存没人等，慢盘上会带着旧 Cookie 退出（#197）。
+        if self.logout_in_flight || self.quit_gate.is_saving() {
+            return;
+        }
+        // 点登出时拍一份快照：盘上读不出来时拿它兜底（真正写盘时会摘掉 Cookie）。
+        let logout_snapshot = self.settings.clone();
+        // 结果回来时对一下 Cookie：期间登录成功、换了账号或被热重载清掉，
+        // 这次结果都属于旧身份，整条丢掉，不能拿它清身份。
+        //
+        // 这里不看 `auth_epoch`：同账号的会员状态刷新也会推进它，
+        // 那种情况身份没变，登出该照常完成（#197）。
+        let logout_cookie = self.settings.cookie.clone();
 
+        // 先落盘、成功后再清身份：落盘失败时保持「还在登录」，免得内存已登出、
+        // 磁盘还留着旧 Cookie，热重载下一轮又把身份放回来（#192）。
+        //
+        // 写盘在锁里读盘上最新配置、只摘 Cookie 再写回：盘上的 Cookie 已经不是
+        // 点击时那个就整次跳过，不会拿旧快照盖掉换进来的新身份，也不吃掉
+        // 保存期间改过的主题、音量等字段（#197）。
+        let expected_cookie = logout_cookie.clone();
+        let save =
+            cx.background_spawn(async move { logout_snapshot.save_signed_out(&expected_cookie) });
+        self.logout_in_flight = true;
+        // 慢盘时保存要等一会儿，先给一句反馈，别让点击看起来没反应。
+        self.set_status_text(self.tr("正在退出登录…"));
+        cx.notify();
+        // 句柄留在 `Root` 上：退出应用时 `on_app_quit` 要等它写完，
+        // 否则保存没落盘就退出，盘上还留着旧 Cookie。
+        let handle = cx.spawn(async move |this, cx| {
+            let outcome = save.await;
+            let confirm = this.update(cx, |root, cx| {
+                root.logout_in_flight = false;
+                if root.settings.cookie != logout_cookie {
+                    // 保存期间换过身份：这份结果已经过期，丢掉，不能拿来清身份。
+                    // 状态行还挂着「正在退出登录…」：现在确实没登录就改回一句实话，
+                    // 换了别的账号则让登录流程自己的状态行留着。
+                    if root.settings.cookie.trim().is_empty() {
+                        root.set_status_text(root.tr("已退出登录"));
+                    }
+                    cx.notify();
+                    return None;
+                }
+                let confirm = match outcome {
+                    Ok(true) => {
+                        // 本次运行里明确登出过：热重载不能再让 `SODA_COOKIE` 把身份补回来（#192）。
+                        // 记号不落盘，重启后仍按环境变量启动。
+                        root.env_cookie_opted_out = true;
+                        // 只在内存里摘掉 Cookie：保存期间改过的其它设置（音量、日志等）
+                        // 不跟着回滚到点击那一刻的快照。
+                        root.settings.cookie.clear();
+                        // 盘上已经写成登出状态，这里只重建会话，不再写一次盘。
+                        if let Some(session) = root.session.as_mut() {
+                            session.adopt(root.settings.clone());
+                        }
+                        // 收尾再确认一次：登出保存持锁期间，别的保存可能正在 UI 线程
+                        // 排队等锁，随后把还带旧 Cookie 的设置写回盘（#197 复审）。
+                        // 只清「盘上仍是旧 Cookie」的情况；已经空了不写，换过身份也跳过。
+                        Some((root.settings.clone(), logout_cookie.clone()))
+                    }
+                    Ok(false) => {
+                        // 盘上身份已经变了，这次写入被跳过：什么都不改，
+                        // 等热重载或登录流程把它们自己的状态行发出来。
+                        None
+                    }
+                    Err(err) => {
+                        // 错误提示会把状态行里的「正在退出登录…」换成同一句失败文案。
+                        root.notify_error_once(
+                            "logout-save-failed",
+                            root.failure_text(
+                                "保存退出登录状态",
+                                &err,
+                                "退出登录失败，账号仍保持登录；检查配置文件能否写入后重试。",
+                            ),
+                        );
+                        None
+                    }
+                };
+                if confirm.is_some() {
+                    root.clear_identity_state(cx);
+                    // 备份不用在这里再写一次：保存本身在写锁内已经刷新过（#185）。
+                    if sodam_core::config::env_cookie_present() {
+                        root.set_status_text(root.tr(
+                            "已退出登录；要彻底退出请取消环境变量 SODA_COOKIE，否则重启会重新登录",
+                        ));
+                    } else {
+                        root.set_status_text(root.tr("已退出登录"));
+                    }
+                }
+                cx.notify();
+                confirm
+            });
+            // 收尾确认跑在登出这条任务链里：退出时等 `logout_save_task` 就一起等到了，
+            // 不会出现「退出流程结束、确认写入还在跑」的窗口（#197 复审）。
+            if let Ok(Some((settings, expected))) = confirm {
+                cx.background_spawn(async move {
+                    let _ = settings.save_signed_out(&expected);
+                })
+                .await;
+            }
+        });
+        self.logout_save_task = Some(handle);
+    }
+
+    /// 旧身份的界面状态清理：播放停住、队列与账号/收藏清空、回到设置页。
+    ///
+    /// 退出登录与「外部把 Cookie 清空了」（热重载）共用这一份，不做保存。
+    fn clear_identity_state(&mut self, cx: &mut Context<Self>) {
         self.engine.stop();
         self.playing = false;
         self.pending_track = None;
         self.playback_error = None;
+        // 推进播放请求序号：正在下载的旧身份装载回来会被序号检查拒绝，
+        // 否则清空队列后旧下载成功仍会把旧曲目塞回引擎（#185）。
+        self.play_seq = self.play_seq.wrapping_add(1);
+        // 在途的队列请求（推荐/听歌模式/加载更多）一并作废：旧回调过了序号
+        // 检查仍会重建队列并开始装载，退出/换号后还能把旧队列播起来。
+        self.recommendation_request_seq = self.recommendation_request_seq.wrapping_add(1);
+        self.recommendation_load_seq = self.recommendation_load_seq.wrapping_add(1);
+        self.loading_recommendation = false;
+        self.recommendation_error = None;
+        self.switching_queue = None;
         // 不可播结论与逐曲冷却按账号 × 会话隔离：退出后旧账号的结论一条都不留。
         // 在途预取回来后按代数丢弃，不能再写回这些已经清空的表。
         self.invalidate_identity_conclusions();
@@ -2144,23 +2456,6 @@ impl Root {
         self.track_menu = None;
         self.queue_menu = None;
         self.set_nav(Nav::Settings, cx);
-
-        let save_result = if let Some(session) = self.session.as_mut() {
-            session.apply(settings.clone())
-        } else {
-            settings.save()
-        };
-        self.settings = settings;
-        match save_result {
-            Ok(()) => self.set_status_text(self.tr("已退出登录")),
-            Err(err) => {
-                self.notify_error_once(
-                    "logout-save-failed",
-                    self.failure_text("已退出，但保存配置失败", &err, SAVE_TEXT),
-                );
-            }
-        }
-        cx.notify();
     }
 
     /// 详情列表内的加载更多分发。
@@ -2168,6 +2463,231 @@ impl Root {
         if self.nav == Nav::Artist {
             self.load_more_artist_tracks(cx);
         }
+    }
+
+    /// 队列抽屉内部滚动由 `UniformListScrollHandle` 的 `base_handle` 驱动，
+    /// 抽出来当成一个普通 `ScrollHandle` 用，避免到处穿透 `UniformListScrollHandle` 内部。
+    fn queue_base_handle(&self) -> gpui::ScrollHandle {
+        self.queue_scroll.0.borrow().base_handle.clone()
+    }
+
+    /// 搜索页「歌曲」列表也是虚拟列表，同样借 `base_handle` 做像素滚动。
+    fn search_tracks_base_handle(&self) -> gpui::ScrollHandle {
+        self.search_tracks_scroll.0.borrow().base_handle.clone()
+    }
+
+    /// 把 GPUI 的滚动偏移换成「离顶部距离」。
+    /// 偏移是负的：0 在最顶上，越往下滚越负。
+    fn top_from_offset(handle: &gpui::ScrollHandle) -> f32 {
+        -f32::from(handle.offset().y)
+    }
+
+    /// 把「离顶部距离」写回 GPUI 的滚动偏移；横轴保持不变。
+    fn offset_with_top(
+        mut offset: gpui::Point<gpui::Pixels>,
+        top: f32,
+    ) -> gpui::Point<gpui::Pixels> {
+        offset.y = gpui::px(-top);
+        offset
+    }
+
+    /// 普通滚动句柄目标（设置页、队列、搜索页、歌词页）。
+    /// 六个变高虚拟列表不走这里，它们只吃增量。
+    fn drag_scroll_handle(&self, target: DragTarget) -> Option<gpui::ScrollHandle> {
+        Some(match target {
+            DragTarget::Settings => self.settings_scroll.clone(),
+            DragTarget::Queue => self.queue_base_handle(),
+            DragTarget::SearchGroups => self.search_groups_scroll.clone(),
+            DragTarget::SearchTracks => self.search_tracks_base_handle(),
+            DragTarget::SearchArtists => self.search_artists_scroll.clone(),
+            DragTarget::SearchAlbums => self.search_albums_scroll.clone(),
+            DragTarget::SearchPlaylists => self.search_playlists_scroll.clone(),
+            DragTarget::PlaylistGrid => self.playlist_grid_scroll.clone(),
+            DragTarget::Lyrics => self.lyrics_scroll.clone(),
+            _ => return None,
+        })
+    }
+
+    /// 六个变高虚拟列表各自的滚动状态。
+    fn drag_list_state(&self, target: DragTarget) -> Option<&gpui::ListState> {
+        Some(match target {
+            DragTarget::Scenes => &self.scenes_list,
+            DragTarget::LikedDetail => &self.liked_detail_list,
+            DragTarget::LibraryDetail => &self.library_detail_list,
+            DragTarget::SearchPlaylistDetail => &self.search_playlist_detail_list,
+            DragTarget::ArtistDetail => &self.artist_detail_list,
+            DragTarget::AlbumDetail => &self.album_detail_list,
+            _ => return None,
+        })
+    }
+
+    /// 这个目标眼下离顶部多远。
+    fn drag_top(&self, target: DragTarget) -> f32 {
+        if let Some(handle) = self.drag_scroll_handle(target) {
+            return Self::top_from_offset(&handle);
+        }
+        if let Some(list) = self.drag_list_state(target) {
+            return -f32::from(list.scroll_px_offset_for_scrollbar().y);
+        }
+        0.0
+    }
+
+    /// 这个目标最多能滚多远。
+    /// 变高列表用的是「已测量高度」，会随滚动变大；差的那段靠下一帧补（#168）。
+    fn drag_max_top(&self, target: DragTarget) -> f32 {
+        if let Some(handle) = self.drag_scroll_handle(target) {
+            return f32::from(handle.max_offset().y);
+        }
+        if let Some(list) = self.drag_list_state(target) {
+            return f32::from(list.max_offset_for_scrollbar().y);
+        }
+        0.0
+    }
+
+    /// 把「离顶部距离」写回目标：普通句柄写绝对偏移，列表按增量滚。
+    fn apply_drag_top(&self, target: DragTarget, top: f32) {
+        if let Some(handle) = self.drag_scroll_handle(target) {
+            handle.set_offset(Self::offset_with_top(handle.offset(), top));
+            return;
+        }
+        if let Some(list) = self.drag_list_state(target) {
+            let delta = top - self.drag_top(target);
+            list.scroll_by(gpui::px(delta));
+        }
+    }
+
+    /// 结束当前拖动（不管是哪个目标），帧循环的计时也一并清掉。
+    pub(crate) fn finish_middle_drag(&mut self) {
+        self.middle_drag.finish();
+        self.middle_drag_last_frame = None;
+    }
+
+    /// 只结束「正好是这个目标」的拖动。
+    /// 异步回调迟到时，用户可能已经在别的列表上开拖了，不能一把全停。
+    pub(crate) fn finish_middle_drag_for(&mut self, target: DragTarget) {
+        if self.middle_drag.target() == Some(target) {
+            self.finish_middle_drag();
+        }
+    }
+
+    /// 上报「中键按下」：记下起点和这个区域当时的滚动位置。
+    fn begin_middle_drag_on(&mut self, target: DragTarget, y: f32) {
+        // 上一次手势的帧计时可能还留着；新按下就清掉，首帧从 dt = 0 起步。
+        self.middle_drag_last_frame = None;
+        let top = self.drag_top(target);
+        let nav = self.nav;
+        self.middle_drag.begin(y, top, nav, target);
+    }
+
+    /// 设置页上报「中键按下」。
+    pub(crate) fn begin_middle_drag(&mut self, y: f32) {
+        self.begin_middle_drag_on(DragTarget::Settings, y);
+    }
+
+    /// 队列抽屉上报「中键按下」。
+    pub(crate) fn begin_middle_drag_queue(&mut self, y: f32) {
+        self.begin_middle_drag_on(DragTarget::Queue, y);
+    }
+
+    /// 搜索页各个列表和歌单网格上报「中键按下」，按 `target` 分清是谁。
+    pub(crate) fn begin_middle_drag_for(&mut self, target: DragTarget, y: f32) {
+        self.begin_middle_drag_on(target, y);
+    }
+
+    /// 歌词页上报「中键按下」：只记下起点和歌词当时的滚动位置。
+    ///
+    /// 这里**不动**自动跟唱：按下没拖（或者抖动不到 2px）就什么都不该发生，
+    /// 让位留到真正滚起来那一刻（见 [`Self::middle_drag_move`]）。
+    /// 按下到首次移动之间补间还会推进列表；起步前的每次移动都会按此刻偏移重定锚点（#169）。
+    pub(crate) fn begin_middle_drag_lyrics(&mut self, y: f32) {
+        self.begin_middle_drag_on(DragTarget::Lyrics, y);
+    }
+
+    /// 用户自己动手了（滚轮或中键拖动）：先停 5 秒自动跟唱，再停掉滚动动画。
+    ///
+    /// 两处入口共用同一份逻辑，行为保持一致：跟唱停 5 秒是官方的手感，
+    /// 而动画不停会和手势抢同一个偏移，看起来就是拖一下被拽回去一下。
+    pub(crate) fn pause_lyrics_follow(&mut self) {
+        self.lyrics_user_scroll_until =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        self.cancel_lyrics_scroll_tween();
+    }
+
+    /// 中键按着移动时更新指针位置（#182）。
+    ///
+    /// 距离驱动语义下指针只决定速度，不直接决定位置；位置的推进由帧循环
+    /// （`Root::render` 每帧的 [`Self::advance_middle_drag_scroll`]）负责，
+    /// 指针停住不动也继续滚。刚越过死区那一刻歌词页先让位一次，
+    /// 之后的持续让位由帧循环每帧续。
+    pub(crate) fn middle_drag_move(
+        &mut self,
+        y: f32,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = self.middle_drag.target() else {
+            return;
+        };
+        let already_scrolling = self.middle_drag.is_scrolling();
+        let is_lyrics = target == DragTarget::Lyrics;
+        let nav = self.nav;
+        let window_active = window.is_window_active();
+        // 歌词页按下后，自动跟唱补间仍可能推进列表；起步前每次移动都按此刻的真实偏移
+        // 重定积分起点，真正越过死区时从最新位置开始，首帧不跳（#169）。
+        // 起步后积分起点不能再改，重定只会空转，直接跳过（#189）。
+        if is_lyrics && !already_scrolling {
+            let top = self.drag_top(target);
+            self.middle_drag
+                .rebase_unstarted_top(top, nav, window_active);
+        }
+        let just_started = self.middle_drag.update_pointer(y, nav, window_active);
+        if is_lyrics && just_started {
+            self.pause_lyrics_follow();
+        }
+        // 起步后帧循环每帧都会经由 `request_animation_frame` 标脏，指针位置下一帧
+        // 就会被读到；鼠标移动再标脏是重复动作（#189）。没起步（含死区内的每次移动）
+        // 和起步那次仍然标脏；`last_frame` 为空说明起步后一帧还没跑过（起步事件可能
+        // 落在绘制中途被吞），这里补一次。已知边界：帧循环完全停摆时（窗口最小化等）
+        // 这里不会自愈，靠系统重绘恢复。
+        if !already_scrolling || self.middle_drag_last_frame.is_none() {
+            cx.notify();
+        }
+    }
+
+    /// 距离驱动的自动滚动 dt 上限（毫秒）：渲染卡了一拍也只按这个时长推进，
+    /// 不会把卡住的时间一口气滚完。
+    const MAX_DRAG_FRAME_DT_MS: f32 = 50.0;
+
+    /// 帧循环推进一次中键自动滚动（#182）。
+    ///
+    /// 由 `Root::render` 在 `is_scrolling()` 时每帧调用：按当前指针离参照点的
+    /// 距离算速度，乘上距上一帧的 dt，积分出这一帧的目标位置并写回。
+    /// 指针停住不动时没有鼠标事件，滚动全靠这里。松手、切页、失焦后
+    /// `middle_drag` 已被清掉，直接收摊，下一帧循环自然停。
+    pub(crate) fn advance_middle_drag_scroll(&mut self, window: &mut gpui::Window) {
+        let Some(target) = self.middle_drag.target() else {
+            self.middle_drag_last_frame = None;
+            return;
+        };
+        let nav = self.nav;
+        let window_active = window.is_window_active();
+        let max_top = self.drag_max_top(target);
+        let now = std::time::Instant::now();
+        let dt_ms = self
+            .middle_drag_last_frame
+            .map_or(0.0, |last| (now - last).as_secs_f32() * 1000.0)
+            .min(Self::MAX_DRAG_FRAME_DT_MS);
+        self.middle_drag_last_frame = Some(now);
+        let Some(top) = self.middle_drag.advance(dt_ms, max_top, nav, window_active) else {
+            self.middle_drag_last_frame = None;
+            return;
+        };
+        // 歌词页：拖动期间每帧续一次让位。指针停住不动时没有鼠标事件来续，
+        // 不在这里续的话跟唱 5 秒一到就会把视图拽回当前句。
+        if target == DragTarget::Lyrics {
+            self.pause_lyrics_follow();
+        }
+        self.apply_drag_top(target, top);
     }
 
     /// 统一页面切换：保留返回栈，详情页使用通用返回组件。
@@ -2438,6 +2958,9 @@ impl Root {
 
     /// 通用返回：同页详情优先关闭，再按真实访问历史回退。
     pub fn go_back(&mut self, cx: &mut Context<Self>) {
+        // 关掉同页详情时页签没变，渲染里的 sync_context 认不出来；中键还按着
+        // 就会继续滚已经不显示的列表。这里先手动停手，切页时这句是幂等的。
+        self.finish_middle_drag();
         if self.nav == Nav::Search && self.search_playlist.is_some() {
             self.search_playlist = None;
             self.loading_search_playlist = false;
@@ -2486,6 +3009,7 @@ impl Root {
                 Nav::Library => self.load_playlists(cx),
                 Nav::Liked => {
                     // 收藏页使用独立列表状态；已加载数据也要重建到页首。
+                    self.finish_middle_drag_for(DragTarget::LikedDetail);
                     self.liked_detail_list.reset(self.liked.len() + 1);
                     self.load_liked(cx);
                 }
@@ -2590,6 +3114,9 @@ impl Root {
         self.loading_library = true;
         self.set_status_text(self.tr("正在读取歌单…"));
         cx.notify();
+        // 请求归属发起时的身份：外部换号后旧结果整份丢弃，不让旧账号的
+        // 歌单写回缓存，也把新身份的重拉接上（#185）。
+        let auth_epoch = self.auth_epoch;
         let work = cx.background_spawn(async move {
             let session = Session::new(settings);
             sodam_core::library::user_playlists(&session)
@@ -2598,6 +3125,12 @@ impl Root {
             let result = work.await;
             let _ = this.update(cx, |root, cx| {
                 root.loading_library = false;
+                if root.auth_epoch != auth_epoch {
+                    if !root.settings.cookie.trim().is_empty() {
+                        root.load_playlists(cx);
+                    }
+                    return;
+                }
                 match result {
                     Ok(playlists) => {
                         root.set_status("共 {} 个歌单", &[playlists.len().to_string()]);
@@ -2627,6 +3160,9 @@ impl Root {
         }
         self.liked_loading = true;
         let settings = self.settings.clone();
+        // 请求归属发起时的身份：外部换号后旧结果整份丢弃，不让旧账号的
+        // ids 写进新会话（#185）。
+        let auth_epoch = self.auth_epoch;
         let work = cx.background_spawn(async move {
             let session = Session::new(settings);
             // 启动时网络/接口可能未就绪：最多尝试 3 次（2s / 4s 退避），
@@ -2647,6 +3183,13 @@ impl Root {
             let result = work.await;
             let _ = this.update(cx, |root, cx| {
                 root.liked_loading = false;
+                if root.auth_epoch != auth_epoch {
+                    // 旧身份的结果不要：新身份还没拉过 ids，接着拉一次。
+                    if !root.settings.cookie.trim().is_empty() {
+                        root.load_liked_ids(cx);
+                    }
+                    return;
+                }
                 match result {
                     Ok(ids) => {
                         root.liked_ids = Arc::new(ids);
@@ -2739,6 +3282,7 @@ impl Root {
 
     /// 拉「我喜欢的音乐」。
     pub fn load_liked(&mut self, cx: &mut Context<Self>) {
+        self.finish_middle_drag_for(DragTarget::LikedDetail);
         self.liked_detail_list.reset(self.liked.len() + 1);
         // `liked` 可能被点爱心提前预填；是否完整加载必须单独标记。
         if self.loading_liked || self.liked_loaded {
@@ -2753,6 +3297,8 @@ impl Root {
         self.loading_liked = true;
         self.set_status_text(self.tr("正在读取我喜欢的音乐…"));
         cx.notify();
+        // 请求归属发起时的身份：外部换号后旧结果整份丢弃（#185）。
+        let auth_epoch = self.auth_epoch;
         let work = cx.background_spawn(async move {
             let session = Session::new(settings);
             sodam_core::library::liked_songs(&session)
@@ -2761,6 +3307,13 @@ impl Root {
             let result = work.await;
             let _ = this.update(cx, |root, cx| {
                 root.loading_liked = false;
+                if root.auth_epoch != auth_epoch {
+                    // 旧身份的结果不要；新身份还没拉过完整收藏，接着拉一次。
+                    if !root.settings.cookie.trim().is_empty() {
+                        root.load_liked(cx);
+                    }
+                    return;
+                }
                 match result {
                     Ok(tracks) => {
                         root.liked_loaded = true;
@@ -2769,6 +3322,7 @@ impl Root {
                         root.liked_ids =
                             Arc::new(tracks.iter().map(|track| track.id.clone()).collect());
                         root.liked_ids_failed = false;
+                        root.finish_middle_drag_for(DragTarget::LikedDetail);
                         root.liked_detail_list.reset(tracks.len() + 1);
                         root.set_status("我喜欢的音乐：{} 首", &[tracks.len().to_string()]);
                         // 只取头部封面（列表封面由「可见行」按需排队）
@@ -2893,6 +3447,8 @@ impl Root {
         if self.loading_search_playlist {
             return;
         }
+        // 从搜索结果点进歌单详情，可拖的列表换了，旧起点作废。
+        self.finish_middle_drag();
         let playlist_id = playlist.id.clone();
         self.search_playlist = Some((
             playlist_id.clone(),
@@ -2915,6 +3471,7 @@ impl Root {
                 match result {
                     Ok(tracks) => {
                         let count = tracks.len();
+                        root.finish_middle_drag_for(DragTarget::SearchPlaylistDetail);
                         root.search_playlist_detail_list.reset(count + 1);
                         let head: Vec<String> = tracks
                             .first()
@@ -2964,6 +3521,8 @@ impl Root {
         if self.loading_playlist {
             return;
         }
+        // 从歌单网格点进详情，可拖的列表换了，旧起点作废。
+        self.finish_middle_drag();
         let playlist_title = known_title.unwrap_or_else(|| {
             self.playlists
                 .iter()
@@ -2979,6 +3538,7 @@ impl Root {
             playlist_title.clone(),
             Arc::new(Vec::new()),
         ));
+        self.finish_middle_drag_for(DragTarget::LibraryDetail);
         self.library_detail_list.reset(1);
         self.loading_playlist = true;
         self.set_status_text(self.tr("正在读取歌单曲目…"));
@@ -3017,6 +3577,7 @@ impl Root {
                         }
                         let final_count = tracks.len();
                         root.open_playlist = Some((playlist_id, playlist_title, Arc::new(tracks)));
+                        root.finish_middle_drag_for(DragTarget::LibraryDetail);
                         root.library_detail_list.reset(final_count + 1);
                     }
                     Err(err) => {
@@ -3506,6 +4067,186 @@ impl Root {
         }
         self.play_reporter.apply_settings(reporter_settings);
     }
+
+    /// 发起一次配置热重载轮询（main.rs 心跳每 ~500ms 调用一次）。
+    ///
+    /// 返回 `None` 表示上一次轮询还在后台跑，这次跳过。
+    pub(crate) fn begin_config_poll(&mut self) -> Option<super::ConfigPollRequest> {
+        if self.config_poll_busy {
+            return None;
+        }
+        self.config_poll_busy = true;
+        Some(super::ConfigPollRequest {
+            tracker: self.config_reload.clone(),
+            path: Settings::config_path(),
+            current: self.settings.clone(),
+            cookie_fill: if self.env_cookie_opted_out {
+                EnvCookieFill::Skip
+            } else {
+                EnvCookieFill::Allow
+            },
+        })
+    }
+
+    /// 收轮询结果并应用（UI 线程）。
+    ///
+    /// `snapshot` 是发起轮询时的设置快照：若本地在这段往返时间里又改过，
+    /// 就不拿旧快照之后的外部结果整份覆盖新值（#185 审计）——丢弃本次应用且
+    /// 不确认指纹，下一轮轮询会拿新快照重新比较，外部改动不会被吞掉。
+    pub(crate) fn finish_config_poll(
+        &mut self,
+        event: sodam_core::config_watch::ReloadEvent,
+        snapshot: Settings,
+        cx: &mut Context<Self>,
+    ) {
+        self.config_poll_busy = false;
+        match event {
+            sodam_core::config_watch::ReloadEvent::Quiet
+            | sodam_core::config_watch::ReloadEvent::Unchanged => {}
+            sodam_core::config_watch::ReloadEvent::Apply {
+                settings,
+                fingerprint,
+            } => {
+                // 本地没动过才应用；应用了才确认这份指纹——被丢弃时留给下一轮
+                // 重新处理（下一轮拿新快照比较，文件没变就 Unchanged 收尾）。
+                if self.settings == snapshot {
+                    // 登出记号只在「外部文件写进非空 Cookie」时解除。记号生效时
+                    // 轮询传 `EnvCookieFill::Skip`，补出来的 Cookie 一定是空的；
+                    // 能走到这里，且本地这份快照还是登出后的空 Cookie，说明非空
+                    // Cookie 来自文件（手动粘贴/换号），不是环境变量（#192）。
+                    if !settings.cookie.trim().is_empty() {
+                        self.env_cookie_opted_out = false;
+                    }
+                    self.apply_external_settings(*settings, cx);
+                    let mut tracker = self
+                        .config_reload
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner());
+                    tracker.acknowledge(Some(fingerprint));
+                }
+            }
+            sodam_core::config_watch::ReloadEvent::Corrupt(error) => {
+                self.log_failure("配置文件热重载解析失败", &error);
+                let message = self.localized(
+                    "配置文件解析失败（{}）：已保留当前设置，未改动文件",
+                    &[error],
+                );
+                self.notify_warning_once("config-reload-corrupt", message);
+                cx.notify();
+            }
+        }
+    }
+
+    /// 外部改动的配置热生效：只应用、不保存（#185）。
+    ///
+    /// 字段分三类：
+    /// * 已有即时生效路径的（主题/语言/音量/播放模式/缓存上限/详细日志/快捷键）——
+    ///   沿用同样的应用逻辑，只是不回写文件；
+    /// * 会话类（签名地址/Token/Cookie/设备身份/音质意图）——重建会话，当前曲目
+    ///   不断，下一次取流/搜索/上报用新值；Cookie 变更视为换身份；
+    /// * 其余（搜索历史、titlebar 等）——随 `settings` 整体替换自然生效。
+    fn apply_external_settings(&mut self, mut incoming: Settings, cx: &mut Context<Self>) {
+        let old = self.settings.clone();
+
+        // 防回跳：用户正拖着音量滑条时，外部重载不动音量。
+        if self.volume_scrubbing {
+            incoming.volume = old.volume;
+            incoming.volume_before_mute = old.volume_before_mute;
+        }
+        // 设备身份不轮换：外部文件没带（或带坏了）身份时，沿用当前已生成的这份。
+        if !incoming.login_device().is_valid() && old.login_device().is_valid() {
+            incoming.login_device_id = old.login_device_id.clone();
+            incoming.login_install_id = old.login_install_id.clone();
+        }
+        let shortcuts_changed = old.shortcut_toggle != incoming.shortcut_toggle
+            || old.shortcut_previous != incoming.shortcut_previous
+            || old.shortcut_next != incoming.shortcut_next;
+        let quality_changed =
+            old.quality != incoming.quality || old.quality_source != incoming.quality_source;
+        let session_changed = incoming.session_inputs_differ(&old);
+        let cookie_changed = incoming.cookie != old.cookie;
+        self.settings = incoming.clone();
+
+        // 主题：与 `set_ui_theme*` 同一套应用逻辑（认不得的值回到跟随系统），不落盘。
+        if old.theme != incoming.theme {
+            self.apply_theme_state(&incoming.theme, cx);
+        }
+        // 语言：与 `set_language` 同一套应用逻辑，但不落盘。
+        if old.language != incoming.language {
+            self.apply_language_state(&incoming.language, cx);
+        }
+        // 详细日志即时生效。
+        if old.detailed_logs != incoming.detailed_logs {
+            log_outlet::set_global_detailed(incoming.detailed_logs);
+        }
+        // 音量与静音前音量：直接喂引擎（set_volume 内部已钳制）。
+        if old.volume != incoming.volume || old.volume_before_mute != incoming.volume_before_mute {
+            self.engine.set_volume(incoming.volume);
+        }
+        // 播放模式：队列按钮在播放栏，settings 换掉后同步给队列。
+        // 切到随机要重建随机轮次：面板的「接下来」直接读 shuffle_round，
+        // 不重建会显示空列表或旧模式残留的顺序。
+        if old.play_mode != incoming.play_mode {
+            self.queue.mode = incoming.play_mode;
+            self.queue.reset_shuffle_round();
+            self.queue.prepare_shuffle_round();
+        }
+        // 缓存上限：触一次维护，让超限的旧缓存马上被清。
+        if old.audio_cache_limit_mb != incoming.audio_cache_limit_mb {
+            self.maintain_cache(cx);
+        }
+        // 快捷键：置脏位，main.rs 心跳里统一重绑（清空 + 重建 keymap）。
+        if shortcuts_changed {
+            self.shortcuts_dirty = true;
+        }
+        // 会话类改动：重建会话（不落盘）。当前曲目不断；下一次取流/搜索/上报用新值。
+        if session_changed {
+            match self.session.as_mut() {
+                Some(session) => session.adopt(incoming.clone()),
+                None => self.session = Some(Session::new(incoming.clone())),
+            }
+        }
+        self.play_reporter.apply_settings(incoming.clone());
+        // Cookie 变了就是换了身份：旧身份的结论全部作废，账号与「我喜欢的」按新身份刷新。
+        if cookie_changed {
+            if incoming.cookie.trim().is_empty() {
+                self.clear_identity_state(cx);
+            } else {
+                self.invalidate_identity_conclusions();
+                // A 的账号信息（昵称/VIP）不再代表当前身份：先清空，刷新成功写入
+                // B 的信息；刷新失败时 VIP 状态按未知处理，不按 A 的算（#185 审计）。
+                self.account = None;
+                // 旧账号的歌单/收藏缓存是身份私有数据：换号不清，新账号会直接
+                // 看到旧账号的列表（加载守卫会拦住重拉）。保留当前播放。
+                self.playlists.clear();
+                self.liked = Arc::new(Vec::new());
+                self.liked_ids = Arc::new(HashSet::new());
+                self.liked_ids_failed = false;
+                self.liked_loaded = false;
+                self.open_playlist = None;
+                self.refresh_account(cx);
+                self.load_liked_ids(cx);
+            }
+        }
+        // 音质意图变了：按新意图重新预取下一首（正在播的这首不受影响）。
+        if quality_changed {
+            self.spawn_prefetch(cx);
+        }
+
+        // 接受了外部改动，备份也跟上：热重载不写盘，备份不同步的话，
+        // 之后主文件损坏走恢复会退回加载时的旧值（#185 审计）。IO 放后台。
+        let backup_path = Settings::config_path();
+        let backup_settings = self.settings.clone();
+        cx.background_spawn(async move {
+            let _ = sodam_core::config::write_settings_backup(&backup_path, &backup_settings);
+        })
+        .detach();
+
+        // 普通反馈只走底部状态行（#203）：状态行本身是新文案顶掉旧文案，
+        // 不会再叠出第二条；全局轻提示留给需要叫住用户的事件。
+        self.set_status_text(self.tr("配置文件已更新，改动已生效"));
+        cx.notify();
+    }
 }
 
 /// 外部打开的两种语义，不可互换。
@@ -3669,6 +4410,13 @@ fn play_failure_text(failure: &PlaybackFailure, skipped: bool) -> &'static str {
                 per_track_reason_text(UnplayableReason::Unavailable)
             }
         }
+        RecoveryAction::Undecodable => {
+            if skipped {
+                "这首的音频解不开，已跳过。"
+            } else {
+                per_track_reason_text(UnplayableReason::DecodeFailed)
+            }
+        }
         RecoveryAction::FreeSpace => "本地缓存写入失败，检查磁盘空间。",
         RecoveryAction::Nothing => match failure.stage {
             Stage::Unpack => "本地缓存写入失败，检查磁盘空间。",
@@ -3685,6 +4433,7 @@ fn per_track_reason_text(reason: UnplayableReason) -> &'static str {
     match reason {
         UnplayableReason::NoFullTrack => "这首在你的账号下没有整曲。",
         UnplayableReason::Unavailable => "这首当前取不到。",
+        UnplayableReason::DecodeFailed => "这首的音频解不开。",
     }
 }
 
@@ -3703,8 +4452,8 @@ fn pending_failure_text(failure: &PlaybackFailure) -> &'static str {
 
 /// 这类失败要不要换一首再试。
 ///
-/// * 按曲目不可播（[`PlaybackFailure::is_per_track`]：无整曲权益 / 下架取不到 / 参数不合法）
-///   与纯网络抖动（`Nothing`）→ 换，队列里还有别的歌；
+/// * 按曲目不可播（[`PlaybackFailure::is_per_track`]：无整曲权益 / 下架取不到 /
+///   参数不合法 / 音频解不开）与纯网络抖动（`Nothing`）→ 换，队列里还有别的歌；
 /// * 登录、签名服务、缺 Cookie、磁盘 → 换一首也一样失败，停下来把动作告诉用户，
 ///   别用「跳过」把同一个全局故障伪装成单首曲目的问题。
 fn should_skip_to_next(failure: &PlaybackFailure) -> bool {
@@ -3843,6 +4592,7 @@ mod failure_text_tests {
         let no_full_track = "这首在你的账号下没有整曲，已跳过。";
         let unavailable = "这首当前取不到，已跳过。";
         let cache = "本地缓存写入失败，检查磁盘空间。";
+        let undecodable_skipped = "这首的音频解不开，已跳过。";
         let offline = "暂时连不上，检查网络后重试。";
         let cant_play = "这首歌暂时放不出来。";
         let at = |stage, action| {
@@ -3874,6 +4624,23 @@ mod failure_text_tests {
             unavailable
         );
         assert_eq!(at(Stage::ResolveStream, RecoveryAction::FreeSpace), cache);
+        // 解密失败不再借磁盘话术：说「解不开」。
+        assert_eq!(
+            at(Stage::Unpack, RecoveryAction::Undecodable),
+            undecodable_skipped
+        );
+        assert_eq!(
+            play_failure_text(
+                &PlaybackFailure::new(
+                    Stage::Unpack,
+                    Retryability::Never,
+                    RecoveryAction::Undecodable,
+                    raw
+                ),
+                false
+            ),
+            "这首的音频解不开。"
+        );
 
         for stage in [Stage::Network, Stage::Transfer, Stage::ResolveStream] {
             let text = at(stage, RecoveryAction::Nothing);
@@ -3900,14 +4667,20 @@ mod failure_text_tests {
         let login = at(RecoveryAction::Relogin);
         let no_full_track = at(RecoveryAction::TrackUnavailable);
         let unavailable = at(RecoveryAction::PickAnother);
+        let decode_failed = at(RecoveryAction::Undecodable);
 
         assert_ne!(login, no_full_track);
         assert_ne!(no_full_track, unavailable);
         assert_ne!(login, unavailable);
+        assert_ne!(decode_failed, no_full_track);
+        assert_ne!(decode_failed, unavailable);
+        // 解密失败不再借「检查磁盘空间」的话术。
+        assert_ne!(decode_failed, "本地缓存写入失败，检查磁盘空间。");
         assert!(no_full_track.contains("已跳过"), "{no_full_track}");
         assert!(unavailable.contains("已跳过"), "{unavailable}");
+        assert!(decode_failed.contains("已跳过"), "{decode_failed}");
 
-        for key in [login, no_full_track, unavailable] {
+        for key in [login, no_full_track, unavailable, decode_failed] {
             let english = Language::English.text(key);
             assert_ne!(english, key, "英文词典缺少：{key}");
             // 被跳过的曲目不报歌名：文案是静态的，不含任何曲目标题占位符。
@@ -3928,6 +4701,7 @@ mod failure_text_tests {
         for key in [
             at(RecoveryAction::TrackUnavailable),
             at(RecoveryAction::PickAnother),
+            at(RecoveryAction::Undecodable),
         ] {
             assert!(!key.contains("已跳过"), "{key}");
             let english = Language::English.text(key);
@@ -3955,6 +4729,8 @@ mod failure_text_tests {
         };
         assert!(should_skip_to_next(&at(RecoveryAction::TrackUnavailable)));
         assert!(should_skip_to_next(&at(RecoveryAction::PickAnother)));
+        // 解密失败是按曲目不可播：自动跳下一首。
+        assert!(should_skip_to_next(&at(RecoveryAction::Undecodable)));
         // 网络抖动仍然换一首（既有行为）。
         assert!(should_skip_to_next(&PlaybackFailure::new(
             Stage::Network,
@@ -4029,17 +4805,12 @@ mod prefetch_policy_tests {
 
     /// 无法归类、可重试性为 `Never` 的失败不能变成永久黑名单：它只进冷却。
     ///
-    /// 对应 #117 的三种来源：解密失败、非鉴权业务码、未识别的 HTTP 状态码。
-    /// 按曲目类与全局类仍各走自己的出口，三者的判据是同一份失败分类。
+    /// 对应 #117 的三种来源：非鉴权业务码、未识别的 HTTP 状态码。
+    /// （解密失败后来归成了「解不开」，按曲目走，见下。）按曲目类与全局类
+    /// 仍各走自己的出口，三者的判据是同一份失败分类。
     #[test]
     fn unclassified_never_failures_route_to_cooldown_not_a_permanent_ban() {
         let cooldown = [
-            PlaybackFailure::new(
-                Stage::Unpack,
-                Retryability::Never,
-                RecoveryAction::Nothing,
-                "crypto failure",
-            ),
             PlaybackFailure::new(
                 Stage::ResolveStream,
                 Retryability::Never,
@@ -4070,6 +4841,20 @@ mod prefetch_policy_tests {
         assert_eq!(
             prefetch_failure_route(&per_track),
             PrefetchFailureRoute::PerTrack
+        );
+
+        // 解密失败归成的「解不开」走按曲目分支：进不可播集合，不进 60 秒逐曲冷却。
+        // （真实 SodaError → Undecodable 的分类断言在 sodam-core 的 failure / prefetch 测试里。）
+        let decode = PlaybackFailure::new(
+            Stage::Unpack,
+            Retryability::Never,
+            RecoveryAction::Undecodable,
+            "decrypted size mismatch",
+        );
+        assert_eq!(
+            prefetch_failure_route(&decode),
+            PrefetchFailureRoute::PerTrack,
+            "{decode:?}"
         );
 
         let signer = PlaybackFailure::new(

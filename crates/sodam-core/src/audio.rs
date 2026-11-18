@@ -1130,6 +1130,7 @@ mod tests {
                 preview: false,
                 quality_rank: None,
                 checked_rank: None,
+                preview_retry_blocked: false,
                 lease: crate::cache::CacheLease::acquire(&path),
             };
             let seq = engine.load(
@@ -1172,6 +1173,7 @@ mod tests {
             preview: false,
             quality_rank: None,
             checked_rank: None,
+            preview_retry_blocked: false,
         };
         let seq = engine.load(
             TrackItem {

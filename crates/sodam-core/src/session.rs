@@ -59,6 +59,8 @@ struct CachedInfo {
     preview: bool,
     quality_rank: Option<i64>,
     checked_rank: Option<i64>,
+    /// 上次补整曲的尝试仍在退避期内；只对试听片段可能为真。
+    preview_retry_blocked: bool,
 }
 
 impl Session {
@@ -70,15 +72,16 @@ impl Session {
         self.settings.quality_intent().cache_tag()
     }
 
-    /// 解析 sidecar `{档位}\t{字节}\t{0|1}\t{档位分数}\t{已探测目标档位}\t{探测时间}`，
+    /// 解析 sidecar `{档位}\t{字节}\t{0|1}\t{档位分数}\t{已探测目标档位}\t{探测时间}\t{补整曲尝试时间}`，
     /// 与实际字节数核对后给出完整记录。
     ///
     /// 只认「非空文件」会让被截断的半截下载永久冒充有效缓存，表现为每次都从中间开始，
     /// 所以尺寸不符或档位为空一律 miss，重下自愈。
     /// 第三个字段记录试听标记；更早的旧格式把试听拼在档位里（`无损 · 试听`），
     /// 这里把它读出来、顺手洗回纯档位——已经下好的整曲不该因为多一个字段就被重下。
-    /// 第四到第六个字段后加：实际档位缺失时视为未知，不据此标记降档；
-    /// 第五、六个字段记录升级探测结论，过期记录不参与跳过判断。
+    /// 第四到第七个字段后加：实际档位缺失时视为未知，不据此标记降档；
+    /// 第五、六个字段记录「没有更高档位」的结论，第七个记录试听补整曲的最近一次尝试。
+    /// 后两者必须分开：试听不是「曲库没有更高档位」，权益一变就可能拿到整曲。
     fn cached_info(&self, track_id: &str) -> Option<CachedInfo> {
         let path = crate::audio::cache_dir().join(format!("{track_id}-{}.m4a", self.quality_tag()));
         let actual = std::fs::metadata(&path).ok()?.len();
@@ -89,13 +92,16 @@ impl Session {
             crate::audio::cache_dir().join(format!("{track_id}-{}.quality", self.quality_tag()));
         let text = std::fs::read_to_string(&quality_path).ok()?;
         let meta = crate::cache::parse_sidecar(&text, actual)?;
-        let checked = meta.fresh_checked_rank(crate::cache::now_epoch_secs());
+        let now = crate::cache::now_epoch_secs();
+        let checked = meta.fresh_checked_rank(now);
+        let preview_retry_blocked = meta.fresh_preview_attempt_at(now).is_some();
         Some(CachedInfo {
             path,
             quality: meta.quality,
             preview: meta.preview,
             quality_rank: meta.actual_rank,
             checked_rank: checked,
+            preview_retry_blocked,
         })
     }
 
@@ -113,6 +119,7 @@ impl Session {
             preview: info.preview,
             quality_rank: info.quality_rank,
             checked_rank: info.checked_rank,
+            preview_retry_blocked: info.preview_retry_blocked,
             lease,
         })
     }
@@ -150,7 +157,8 @@ pub struct CachedTrack {
     /// 「为什么三十秒就切歌了」。签名服务不可用或账号没有整曲权益时都会走到这里，
     /// 而且上游是**静默**降级的（返回 `Ok`），所以这个布尔必须一路带到界面。
     pub preview: bool,
-    /// 这条流的档位分数（与取流筛选同一套刻度）；`None` = 旧缓存没记，未知。
+    /// 这条流的档位分数（与取流筛选同一套刻度）；`None` = 旧缓存没记，`Some(0)` = 记了但
+    /// 认不出档位。两者都算未知，但只有前者值得重下一次去量（见 [`CachedTrack::needs_upgrade`]）。
     ///
     /// 与所选是否相符是**每次读取时现算**的：用当前意图与这里的实际档位比较，
     /// 结论不写回缓存——否则用户改了意图，缓存里的旧结论就成了假话。
@@ -159,6 +167,11 @@ pub struct CachedTrack {
     ///
     /// 只用于决定是否再发起升级，不改变降档提示：曲目确实还在低档位播放。
     pub checked_rank: Option<i64>,
+    /// 上次补整曲的尝试还在退避期内（见 [`crate::cache::PREVIEW_RETRY_TTL`]）。
+    ///
+    /// 只可能对试听片段为真。它挡的是「应用每次启动、每次命中都整曲下一遍」，
+    /// 不是「以后都不再试」：退避期一过仍会再要一次。
+    pub preview_retry_blocked: bool,
     pub(crate) lease: crate::cache::CacheLease,
 }
 
@@ -168,15 +181,22 @@ impl CachedTrack {
         self.quality_rank.map(crate::quality::tier_label)
     }
 
-    /// 命中缓存后是否还需要向服务端要更高档位。
+    /// 命中缓存后是否还需要向服务端要一次流。
     ///
-    /// 实际档位已达目标、或最近已经确认过该目标没有更高流时，都不再请求。
-    /// 档位未知的旧缓存（#89）按 sidecar 的档位标签判断：证明不了达标就重下。
+    /// * 试听片段（#130）：目标是整曲，不是更高档位。只要上次补整曲的尝试已过退避期
+    ///   就再试一次，不看 `quality_rank`——尤其不能被认不出的 0 分挡住。试听本来只有
+    ///   半条流，重下不是白跑；权益到手后拿到整曲是实打实的提升。
+    /// * 整曲：实际档位已达目标、或最近已经确认过该目标没有更高流时，都不再请求。
+    ///   没记分数的旧缓存（#89）按 sidecar 的档位标签判断：证明不了达标就重下；
+    ///   记了 0 分（认不出档位）的不重下，重下拿回的还是同一条流（#96）。
     pub fn needs_upgrade(
         &self,
         intent: &crate::quality::QualityIntent,
         is_vip: Option<bool>,
     ) -> bool {
+        if self.preview {
+            return !self.preview_retry_blocked;
+        }
         let target_rank = crate::quality::target_rank(intent, is_vip);
         crate::quality::is_tier_below_selected(self.quality_rank, &self.quality, intent, is_vip)
             && !crate::cache::upgrade_check_covers(self.checked_rank, target_rank)
@@ -184,17 +204,25 @@ impl CachedTrack {
 
     /// 播放命中时是否值得**自动**发起后台升级。
     ///
-    /// 与 [`Self::needs_upgrade`] 只差一种情形：档位未知的旧缓存，如果这次探测的结论
+    /// 整曲与 [`Self::needs_upgrade`] 只差一种情形：档位未知的旧缓存，如果这次探测的结论
     /// 根本没法写进 sidecar（账号权益未确认，见 `can_record_unavailable`），那这个结论
     /// 就留不下来——本会话内的去重（`cache_upgrade_attempted`）挡得住连续切歌，
     /// 挡不住下次启动再来一遍。对存量缓存来说那等于每次启动都把这首歌整曲下一遍、
     /// 再发现没有更高的流。自动路径不该替用户做这种决定；用户主动点的批量升级仍走
     /// `needs_upgrade`，那一下是他自己同意花流量的。
+    ///
+    /// 试听补整曲有自己的退避记录（sidecar 第 7 字段），所以不必借用「结论能不能写下来」
+    /// 这道闸；但仍要过权益预检：需要会员的档位在账号确认不是会员时不自动重下，
+    /// 那只会拿回另一条试听。用户主动批量升级的加入与否是单独的产品决定，本票不改。
     pub fn needs_auto_upgrade(
         &self,
         intent: &crate::quality::QualityIntent,
         is_vip: Option<bool>,
     ) -> bool {
+        if self.preview {
+            return self.needs_upgrade(intent, is_vip)
+                && !crate::quality::batch_upgrade_needs_confirmed_entitlement(intent, is_vip);
+        }
         if !self.needs_upgrade(intent, is_vip) {
             return false;
         }
@@ -250,10 +278,25 @@ fn record_upgrade_check(
     );
 }
 
+/// 记下「刚为补整曲重新取过一次流」；失败不影响播放，退避没写成下次再试。
+fn record_preview_upgrade_attempt(
+    quality_path: &std::path::Path,
+    audio_path: &std::path::Path,
+    actual_rank: Option<i64>,
+) -> bool {
+    // 与替换路径共用同一把写锁，避免退避时间落到并发替换后的新文件上。
+    let lock = crate::cache::download_lock(audio_path);
+    let _guard = lock.lock().unwrap_or_else(|err| err.into_inner());
+    crate::cache::record_preview_attempt(quality_path, actual_rank, crate::cache::now_epoch_secs())
+        .unwrap_or(false)
+}
+
 /// 确认性 miss：拿到完整流、档位可识别、目标存在、权益已确认，且实际档位低于目标。
 ///
 /// 返回应写入 sidecar 的 `checked_rank`。试听回退、权益未确认、档位未知、目标未知或
 /// 实际已经达标都不写——这些结论会随账号权益或曲库变化，不能持久化。
+/// 试听回退也不写：它不是「曲库没有更高档位」，只是「这次只给了半条流」；
+/// 补整曲的重试节奏另由 sidecar 第 7 字段的退避记录管理（#130）。
 fn confirmed_miss_rank(
     target_rank: Option<i64>,
     actual_rank: i64,
@@ -265,6 +308,18 @@ fn confirmed_miss_rank(
     }
     let target = target_rank?;
     (actual_rank < target).then_some(target)
+}
+
+/// 新取到的试听流是否会顶掉已有的整曲缓存。
+///
+/// 这条护栏与档位高低无关：整曲永远比试听完整，哪怕试听那条流的档位分数更高。
+/// 单独拆出来是为了让「试听不覆盖整曲」能离线测（`upgrade_cached_track` 本身要网络）。
+/// 参数用真实类型而不是两个布尔，调用点写反顺序编译不过。
+fn would_downgrade_to_preview(
+    info: &libresoda::soda::types::DownloadInfo,
+    current: &CachedTrack,
+) -> bool {
+    info.is_preview && !current.preview
 }
 
 /// 这次取到的新流是否值得换掉本地已有的那一份缓存。
@@ -299,21 +354,32 @@ fn is_better_stream(
     new_rank > old_rank
 }
 
-/// 拼出 sidecar 内容；有探测结论时写第 5、6 字段。
+/// 拼出 sidecar 内容。
+///
+/// 前四字段始终写；有「没有更高档位」结论时补第 5、6 字段；试听补整曲的尝试时间写第 7
+/// 字段——即使第 5、6 字段为空也要留出位置，否则读回来会错位。
 fn encode_sidecar(
     quality: &str,
     written: u64,
     preview: bool,
     actual_rank: i64,
     checked_rank: Option<i64>,
+    preview_attempt_at: Option<u64>,
 ) -> String {
-    match checked_rank {
-        Some(rank) => format!(
-            "{quality}\t{written}\t{}\t{actual_rank}\t{rank}\t{}",
-            u8::from(preview),
+    let flag = u8::from(preview);
+    match (checked_rank, preview_attempt_at) {
+        (Some(rank), None) => format!(
+            "{quality}\t{written}\t{flag}\t{actual_rank}\t{rank}\t{}",
             crate::cache::now_epoch_secs(),
         ),
-        None => format!("{quality}\t{written}\t{}\t{actual_rank}", u8::from(preview)),
+        (Some(rank), Some(attempted_at)) => format!(
+            "{quality}\t{written}\t{flag}\t{actual_rank}\t{rank}\t{}\t{attempted_at}",
+            crate::cache::now_epoch_secs(),
+        ),
+        (None, Some(attempted_at)) => {
+            format!("{quality}\t{written}\t{flag}\t{actual_rank}\t\t\t{attempted_at}")
+        }
+        (None, None) => format!("{quality}\t{written}\t{flag}\t{actual_rank}"),
     }
 }
 
@@ -333,6 +399,11 @@ impl Session {
             fp: settings.fp.clone(),
             ..Default::default()
         });
+        // 登录设备身份由 sodam 配置持有；libresoda 只接收，不替应用决定存哪里。
+        // 配置异常时兜底生成一份，避免整次登录直接失败（下一次配置保存会修正）。
+        if pumpkin.set_qr_device(settings.login_device()).is_err() {
+            let _ = pumpkin.set_qr_device(libresoda::soda::qr_login::QrDevice::generate());
+        }
 
         let url = settings.signer_url.trim();
         if !url.is_empty() {
@@ -344,11 +415,10 @@ impl Session {
         if let crate::quality::QualityIntent::Tier(tier) = settings.quality_intent() {
             pumpkin.set_quality_preference(tier);
         }
-        // 登录必须走签名页（等价上游 Meting-API 的 signQishuiRequest）：本地直连护照接口
-        // 会一路 error_code=7，且确认后的登录态只能由签名页的浏览器会话承接。
-        // sodam 固定使用 libresoda 内置 Rust CDP 签名页：直控 Chromium，无 Node 依赖；
-        // 浏览器路径可用 QISHUI_CHROMIUM_PATH 指定。
-        pumpkin.enable_cdp_signer();
+        // 登录走 libresoda 的纯 HTTP 实现：passport 请求由本进程直接发出，Cookie 由本进程
+        // 持有；遇到二次验证（2046）时用系统默认浏览器打开本机验证页，验证页的请求经
+        // libresoda 的本地桥接代发。不依赖 Chromium / CDP。
+        pumpkin.enable_http_login();
 
         Self { pumpkin, settings }
     }
@@ -553,8 +623,10 @@ impl Session {
                 err.to_string(),
             )
         })?;
+        // 首次下载拿到试听时不写退避：下一次播放命中应该立刻再试一次，
+        // 用户可能刚补上权益或签名服务刚恢复。退避从「后台升级仍拿回试听」才开始记。
         let sidecar_content =
-            encode_sidecar(&quality, written, preview, quality_rank, checked_rank);
+            encode_sidecar(&quality, written, preview, quality_rank, checked_rank, None);
         std::fs::write(&quality_path, sidecar_content).map_err(|err| {
             PlaybackFailure::new(
                 Stage::Unpack,
@@ -572,6 +644,7 @@ impl Session {
             preview,
             quality_rank: Some(quality_rank),
             checked_rank,
+            preview_retry_blocked: false,
             lease,
         })
     }
@@ -638,7 +711,7 @@ impl Session {
         let _writer = upgrade_lock.lock().unwrap_or_else(|err| err.into_inner());
 
         // 获取锁后重读当前缓存，防止并发升级已将其提升
-        let current = match self.cached_track(&track.id) {
+        let mut current = match self.cached_track(&track.id) {
             Some(c) => c,
             None => {
                 return Err(PlaybackFailure::new(
@@ -681,12 +754,19 @@ impl Session {
         }
         .map_err(|err| {
             let _ = std::fs::remove_file(&part);
+            // 补整曲失败也记一次退避：否则应用每次启动都会把同一首整曲下一遍再失败。
+            if current.preview {
+                record_preview_upgrade_attempt(&quality_path, &path, current.quality_rank);
+            }
             classify(&err)
         })?;
 
         let written = std::fs::metadata(&part).map(|meta| meta.len()).unwrap_or(0);
         if written == 0 || is_truncated_download(info.size, written) {
             let _ = std::fs::remove_file(&part);
+            if current.preview {
+                record_preview_upgrade_attempt(&quality_path, &path, current.quality_rank);
+            }
             return Err(PlaybackFailure::new(
                 Stage::Transfer,
                 Retryability::Transient,
@@ -699,7 +779,7 @@ impl Session {
         }
 
         // 核心安全护栏：试听流绝不允许覆盖已有非试听整曲缓存（即便试听流档位分数更高）
-        if info.is_preview && !current.preview {
+        if would_downgrade_to_preview(&info, &current) {
             let _ = std::fs::remove_file(&part);
             return Ok(current);
         }
@@ -712,9 +792,15 @@ impl Session {
         // 档位未知的旧缓存怎么比，见 `is_better_stream`。
         if !is_better_stream(&info, &current, target_rank) {
             let _ = std::fs::remove_file(&part);
-            // 只有「拿到完整流、档位仍没提升」才是确认性结论。试听回退与下载失败
+            // 试听：这次仍拿回试听（或更差的试听），记一次退避，别每次命中都重下。
+            // 整曲：只有「拿到完整流、档位仍没提升」才是确认性结论；试听回退与下载失败
             // 会随会员权益或网络变化，不能写成「没有更高档位」。
-            if let Some(checked_rank) = checked_rank {
+            if current.preview {
+                // 只有退避真的写进 sidecar，返回的对象才跟着标；写失败或跳过时
+                // 内存保持原样，别让两边说两套话。
+                current.preview_retry_blocked |=
+                    record_preview_upgrade_attempt(&quality_path, &path, current.quality_rank);
+            } else if let Some(checked_rank) = checked_rank {
                 record_upgrade_check(&quality_path, &path, current.quality_rank, checked_rank);
             }
             return Ok(current);
@@ -722,7 +808,16 @@ impl Session {
 
         let quality = describe_quality(&info);
         let preview = info.is_preview;
-        let sidecar_content = encode_sidecar(&quality, written, preview, new_rank, checked_rank);
+        // 替换成一整曲时不需要第 7 字段；换成另一条试听时也要从这一刻重新退避。
+        let preview_attempt_at = preview.then(crate::cache::now_epoch_secs);
+        let sidecar_content = encode_sidecar(
+            &quality,
+            written,
+            preview,
+            new_rank,
+            checked_rank,
+            preview_attempt_at,
+        );
 
         // N1 修复：在执行原子替换重命名序列前，获取 download_lock(&path)，
         // 保证在极其短暂的重命名窗口期内与点播下载互斥，防止交错写同一组文件。
@@ -749,6 +844,8 @@ impl Session {
             preview,
             quality_rank: Some(new_rank),
             checked_rank,
+            // 换成另一条试听时 sidecar 已经写了退避时间；换成整曲则不需要。
+            preview_retry_blocked: preview,
             lease: target_lease,
         })
     }
@@ -770,6 +867,17 @@ impl Session {
         // 冗余兜底，确保在其他触发偏好落盘的分支上会话副本也与外部一致。
         self.settings.quality = settings.quality.clone();
         self.settings.quality_source = settings.quality_source;
+        // 界面类字段同步：热重载改了主题/语言/快捷键/搜索历史时不会重建会话，
+        // 而登录的 `apply_login_cookie` 会把会话副本整体落盘——不同步就会把
+        // 用户（或外部编辑）刚改的值写回旧值（#185）。
+        self.settings.theme = settings.theme.clone();
+        self.settings.language = settings.language.clone();
+        self.settings.titlebar = settings.titlebar.clone();
+        self.settings.shortcut_toggle = settings.shortcut_toggle.clone();
+        self.settings.shortcut_previous = settings.shortcut_previous.clone();
+        self.settings.shortcut_next = settings.shortcut_next.clone();
+        self.settings.search_history_enabled = settings.search_history_enabled;
+        self.settings.search_history = settings.search_history.clone();
     }
 
     pub fn settings(&self) -> &Settings {
@@ -781,6 +889,14 @@ impl Session {
         settings.save().context("保存配置失败")?;
         *self = Self::new(settings);
         Ok(())
+    }
+
+    /// 换设置但**不落盘**：只重建会话，盘由调用方负责写，这里不写第二次。
+    ///
+    /// 两个用途：热重载（外部改动刚落进来就被回写一遍，会把用户编辑器里还没保存的
+    /// 内容覆盖掉，#185）；登出在后台落盘成功后的收尾（#197）。
+    pub fn adopt(&mut self, settings: Settings) {
+        *self = Self::new(settings);
     }
 
     /// 获取歌词，并保留原始增强 LRC 中的逐字时间轴。
@@ -971,6 +1087,7 @@ mod tests {
             preview,
             quality_rank: None,
             checked_rank: None,
+            preview_retry_blocked: false,
         };
         assert!(Session::full_track_cached(Some(info(false))));
         assert!(!Session::full_track_cached(Some(info(true))));
@@ -1111,16 +1228,26 @@ mod tests {
     /// 写出与解析必须用同一套字段布局，避免两边各改一处后错位。
     #[test]
     fn encode_sidecar_round_trips_through_parser() {
-        let plain = encode_sidecar("极高 320k", 2000, false, 80, None);
+        let plain = encode_sidecar("极高 320k", 2000, false, 80, None, None);
         assert_eq!(plain, "极高 320k\t2000\t0\t80");
         let plain_checked = crate::cache::parse_sidecar(&plain, 2000).unwrap();
         assert_eq!(plain_checked.checked_rank, None);
+        assert_eq!(plain_checked.preview_attempt_at, None);
 
-        let checked = encode_sidecar("极高 320k", 2000, false, 80, Some(100));
+        let checked = encode_sidecar("极高 320k", 2000, false, 80, Some(100), None);
         let parsed = crate::cache::parse_sidecar(&checked, 2000).unwrap();
         assert_eq!(parsed.actual_rank, Some(80));
         assert_eq!(parsed.checked_rank, Some(100));
         assert!(parsed.checked_at.is_some());
+
+        // 试听补整曲的尝试时间要占到第 7 字段，中间两个空字段不能省。
+        let preview = encode_sidecar("未知 128k", 2000, true, 0, None, Some(1_700_000_000));
+        assert_eq!(preview, "未知 128k\t2000\t1\t0\t\t\t1700000000");
+        let parsed = crate::cache::parse_sidecar(&preview, 2000).unwrap();
+        assert!(parsed.preview);
+        assert_eq!(parsed.actual_rank, Some(0));
+        assert_eq!(parsed.checked_rank, None);
+        assert_eq!(parsed.preview_attempt_at, Some(1_700_000_000));
     }
 
     /// 命中缓存时，确认过的目标不再触发升级；目标提高后仍要重新探测。
@@ -1133,6 +1260,7 @@ mod tests {
             preview: false,
             quality_rank: Some(rank),
             checked_rank: checked,
+            preview_retry_blocked: false,
             lease: lease.clone(),
         };
         let lossless = crate::quality::QualityIntent::parse("lossless");
@@ -1152,6 +1280,7 @@ mod tests {
             preview: false,
             quality_rank: None,
             checked_rank: checked,
+            preview_retry_blocked: false,
             lease: lease.clone(),
         };
         let lossless = crate::quality::QualityIntent::parse("lossless");
@@ -1182,6 +1311,100 @@ mod tests {
         assert!(measured.needs_auto_upgrade(&lossless, Some(false)));
     }
 
+    /// #96：记了 0 分（认不出档位）的缓存两条升级路都不走。重下拿回的还是同一条认不出的流，
+    /// 而 0 分写不进「已确认无更高档」（见 `confirmed_miss_rank`），去重挡不住，
+    /// 放行就等于每次命中都整曲下一遍再丢掉。没记分数的旧缓存不受影响，仍按 #89 去量一次。
+    #[test]
+    fn unreadable_zero_rank_never_upgrades() {
+        let lease = crate::cache::CacheLease::acquire(std::path::Path::new("unreadable.m4a"));
+        let cached = |rank: Option<i64>, quality: &str| CachedTrack {
+            path: std::path::PathBuf::new(),
+            quality: quality.into(),
+            preview: false,
+            quality_rank: rank,
+            checked_rank: None,
+            preview_retry_blocked: false,
+            lease: lease.clone(),
+        };
+        let lossless = crate::quality::QualityIntent::parse("lossless");
+        let auto = crate::quality::QualityIntent::Auto;
+        let unreadable = cached(Some(0), "未知 128k");
+        assert!(!unreadable.needs_upgrade(&lossless, Some(true)));
+        assert!(!unreadable.needs_upgrade(&auto, Some(true)));
+        assert!(!unreadable.needs_auto_upgrade(&lossless, Some(true)));
+        // 权益未确认时也不探：本来 `needs_auto_upgrade` 会因「结论记不住」放行已知档位的记录，
+        // 0 分必须在那道闸之前就挡住。
+        assert!(!unreadable.needs_auto_upgrade(&lossless, Some(false)));
+        assert!(cached(None, "极高 320k").needs_upgrade(&lossless, Some(true)));
+    }
+
+    /// #130：试听补整曲有自己的出口，不被 `actual_rank`（尤其 0 分）连坐；
+    /// 退避期内不再重下，退避过后仍会再试。
+    #[test]
+    fn preview_cache_exits_regardless_of_unreadable_rank() {
+        let lease = crate::cache::CacheLease::acquire(std::path::Path::new("preview.m4a"));
+        let preview = |rank: Option<i64>, blocked: bool| CachedTrack {
+            path: std::path::PathBuf::new(),
+            quality: "未知 128k".into(),
+            preview: true,
+            quality_rank: rank,
+            checked_rank: None,
+            preview_retry_blocked: blocked,
+            lease: lease.clone(),
+        };
+        let lossless = crate::quality::QualityIntent::parse("lossless");
+        let medium = crate::quality::QualityIntent::parse("medium");
+
+        // 认不出档位的 0 分试听：权益确认后播放命中要自动试一次。
+        let unreadable = preview(Some(0), false);
+        assert!(unreadable.needs_upgrade(&lossless, Some(true)));
+        assert!(unreadable.needs_auto_upgrade(&lossless, Some(true)));
+
+        // 认得出档位、且已达所选（50 对 50）的试听同样要补整曲——目标是整曲，不是更高档位。
+        assert!(preview(Some(50), false).needs_upgrade(&medium, None));
+        assert!(preview(Some(50), false).needs_auto_upgrade(&medium, None));
+
+        // 上次尝试还在退避期：这次命中不再重下，等退避过了再试。
+        let backed_off = preview(Some(0), true);
+        assert!(!backed_off.needs_auto_upgrade(&lossless, Some(true)));
+        assert!(!backed_off.needs_upgrade(&lossless, Some(true)));
+
+        // 需要会员的档位在确认非会员时不自动重下，避免拿回另一条试听。
+        assert!(!preview(Some(0), false).needs_auto_upgrade(&lossless, Some(false)));
+        // 不需要会员的档位不受这道闸影响。
+        assert!(preview(Some(0), false).needs_auto_upgrade(&medium, Some(false)));
+    }
+
+    /// #130：试听流绝不覆盖已有整曲，哪怕它的档位分数更高。
+    #[test]
+    fn preview_stream_never_replaces_a_full_track() {
+        use libresoda::soda::types::DownloadInfo;
+
+        let lease = crate::cache::CacheLease::acquire(std::path::Path::new("guard.m4a"));
+        let cached = |preview: bool| CachedTrack {
+            path: std::path::PathBuf::new(),
+            quality: "流畅 128k".into(),
+            preview,
+            quality_rank: Some(50),
+            checked_rank: None,
+            preview_retry_blocked: false,
+            lease: lease.clone(),
+        };
+        let preview_stream = DownloadInfo {
+            is_preview: true,
+            ..Default::default()
+        };
+        let full_stream = DownloadInfo {
+            is_preview: false,
+            ..Default::default()
+        };
+
+        assert!(would_downgrade_to_preview(&preview_stream, &cached(false)));
+        assert!(!would_downgrade_to_preview(&preview_stream, &cached(true)));
+        assert!(!would_downgrade_to_preview(&full_stream, &cached(false)));
+        assert!(!would_downgrade_to_preview(&full_stream, &cached(true)));
+    }
+
     /// #89：新流值不值得换掉本地这份缓存——档位未知的旧文件不能被更差的流顶掉。
     #[test]
     fn is_better_stream_never_trades_a_legacy_file_for_worse_audio() {
@@ -1194,6 +1417,7 @@ mod tests {
             preview,
             quality_rank: rank,
             checked_rank: None,
+            preview_retry_blocked: false,
             lease: lease.clone(),
         };
         let info = |quality: &str, format: &str, bitrate: i64, preview: bool| DownloadInfo {

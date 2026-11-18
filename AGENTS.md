@@ -21,6 +21,7 @@ crates/sodam-core/src/   领域层：配置 / 会话 / 队列 / 音乐库 / 播�
   models.rs              TrackItem / PlaylistItem / ArtistItem / AlbumItem / SceneItem
   queue.rs               播放队列与播放模式
   prefetch.rs            预取管线在全局故障期间的挂起与恢复（纯状态机）
+  quit_gate.rs           主动退出闸门：先等启动落盘做完再退（纯状态机）
   audio.rs               rodio 播放线程
 crates/sodam/src/        GPUI 应用
   main.rs                入口、窗口、托盘启动
@@ -35,6 +36,7 @@ docs/ARCHITECTURE.md     架构与线程模型
 docs/ROADMAP.md          当前状态与剩余工作
 docs/UI-SPEC.md          UI 约束与主题规范
 packaging/arch/          Arch Linux PKGBUILD 与 desktop 文件
+packaging/deb/          Debian/Ubuntu .deb 打包脚本与说明
 packaging/windows/       Windows 安装器脚本与本机验收注意事项
 ```
 

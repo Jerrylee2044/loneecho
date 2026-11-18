@@ -6,9 +6,10 @@ use gpui::{
     IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, Window,
 };
 
-use crate::app::{LoginState, Nav, Root};
+use crate::app::{LoginState, Nav, Root, VerifyWindowState};
 use crate::ui::artwork::{cover, scene_image};
 use crate::ui::icons;
+use crate::ui::middle_drag::DragTarget;
 use crate::ui::spinner::loading_state;
 use crate::ui::theme;
 use crate::ui::theme::ThemeKind;
@@ -396,13 +397,12 @@ fn track_row(
         .into_any_element()
 }
 
-/// 曲目列表（虚拟滚动）。
+/// 曲目列表（虚拟滚动，搜索页「歌曲」列表）。
 #[allow(clippy::too_many_arguments)]
 fn track_list(
     root: &Root,
     tracks: std::sync::Arc<Vec<sodam_core::models::TrackItem>>,
     nav: Nav,
-    scroll: Option<&gpui::UniformListScrollHandle>,
     liked_ids: std::sync::Arc<std::collections::HashSet<String>>,
     covers: std::sync::Arc<std::collections::HashMap<String, std::path::PathBuf>>,
     cover_requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
@@ -446,7 +446,7 @@ fn track_list(
     .min_h(px(0.0))
     .flex_1()
     .min_h(px(0.0))
-    .when_some(scroll.cloned(), |this, handle| this.track_scroll(&handle));
+    .track_scroll(&root.search_tracks_scroll);
 
     div()
         .relative()
@@ -457,6 +457,13 @@ fn track_list(
         .w_full()
         .gap(px(theme::space::XS))
         .child(track_header(cols, root.language))
+        // 按下时上报自己是这次拖动的目标；移动、松开由根元素统一收。
+        .on_mouse_down(
+            MouseButton::Middle,
+            cx.listener(|root, event: &MouseDownEvent, _window, _cx| {
+                root.begin_middle_drag_for(DragTarget::SearchTracks, f32::from(event.position.y));
+            }),
+        )
         .child(
             canvas(
                 move |bounds: gpui::Bounds<gpui::Pixels>, _window, _cx| {
@@ -486,6 +493,7 @@ pub(crate) fn scrolling_detail_page(
     show_load_more: bool,
     on_load_more: Option<gpui::Entity<Root>>,
     list_state: &gpui::ListState,
+    drag_target: DragTarget,
     cx: &mut Context<Root>,
 ) -> AnyElement {
     let language = root.language;
@@ -750,6 +758,13 @@ pub(crate) fn scrolling_detail_page(
         .flex_1()
         .min_h(px(0.0))
         .w_full()
+        // 按下时上报自己是这次拖动的目标；移动、松开由根元素统一收。
+        .on_mouse_down(
+            MouseButton::Middle,
+            cx.listener(move |root, event: &MouseDownEvent, _window, _cx| {
+                root.begin_middle_drag_for(drag_target, f32::from(event.position.y));
+            }),
+        )
         .child(
             canvas(
                 move |bounds: gpui::Bounds<gpui::Pixels>, _window, _cx| {
@@ -1139,6 +1154,7 @@ pub fn render(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> impl 
                         false,
                         None,
                         &root.liked_detail_list,
+                        DragTarget::LikedDetail,
                         cx,
                     ))
                     .into_any_element()
@@ -1178,6 +1194,7 @@ pub fn render(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> impl 
                         false,
                         None,
                         &root.library_detail_list,
+                        DragTarget::LibraryDetail,
                         cx,
                     ))
                     .into_any_element()
@@ -1194,6 +1211,17 @@ pub fn render(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> impl 
                 .min_h(px(0.0))
                 .gap(px(theme::space::SM))
                 .overflow_y_scroll()
+                .track_scroll(&root.playlist_grid_scroll)
+                // 按下时上报自己是这次拖动的目标；移动、松开由根元素统一收。
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(|root, event: &MouseDownEvent, _window, _cx| {
+                        root.begin_middle_drag_for(
+                            DragTarget::PlaylistGrid,
+                            f32::from(event.position.y),
+                        );
+                    }),
+                )
                 .child(playlist_grid(root, cx))
                 .into_any_element(),
         },

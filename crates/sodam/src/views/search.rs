@@ -623,6 +623,14 @@ fn search_groups_view(root: &Root, cx: &mut Context<Root>) -> AnyElement {
         .min_h(px(0.0))
         .gap(px(theme::space::MD))
         .overflow_y_scroll()
+        .track_scroll(&root.search_groups_scroll)
+        // 按下时上报自己是这次拖动的目标；移动、松开由根元素统一收。
+        .on_mouse_down(
+            MouseButton::Middle,
+            cx.listener(|root, event: &MouseDownEvent, _window, _cx| {
+                root.begin_middle_drag_for(DragTarget::SearchGroups, f32::from(event.position.y));
+            }),
+        )
         .child(
             canvas(
                 move |bounds, window, _cx| {
@@ -709,7 +717,6 @@ fn search_results_view(root: &Root, cx: &mut Context<Root>) -> AnyElement {
                     root,
                     root.results.clone(),
                     Nav::Search,
-                    None,
                     root.liked_ids.clone(),
                     root.covers.clone(),
                     root.cover_requests.clone(),
@@ -725,6 +732,16 @@ fn search_results_view(root: &Root, cx: &mut Context<Root>) -> AnyElement {
             .min_h(px(0.0))
             .gap(px(theme::space::XS))
             .overflow_y_scroll()
+            .track_scroll(&root.search_artists_scroll)
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|root, event: &MouseDownEvent, _window, _cx| {
+                    root.begin_middle_drag_for(
+                        DragTarget::SearchArtists,
+                        f32::from(event.position.y),
+                    );
+                }),
+            )
             .when(root.search_keyword.trim().is_empty(), |this| {
                 this.child(empty_state("search", root.tr("输入关键词进行搜索")))
             })
@@ -749,6 +766,16 @@ fn search_results_view(root: &Root, cx: &mut Context<Root>) -> AnyElement {
             .min_h(px(0.0))
             .gap(px(theme::space::XS))
             .overflow_y_scroll()
+            .track_scroll(&root.search_albums_scroll)
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|root, event: &MouseDownEvent, _window, _cx| {
+                    root.begin_middle_drag_for(
+                        DragTarget::SearchAlbums,
+                        f32::from(event.position.y),
+                    );
+                }),
+            )
             .when(root.search_keyword.trim().is_empty(), |this| {
                 this.child(empty_state("search", root.tr("输入关键词进行搜索")))
             })
@@ -773,6 +800,16 @@ fn search_results_view(root: &Root, cx: &mut Context<Root>) -> AnyElement {
             .min_h(px(0.0))
             .gap(px(theme::space::XS))
             .overflow_y_scroll()
+            .track_scroll(&root.search_playlists_scroll)
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|root, event: &MouseDownEvent, _window, _cx| {
+                    root.begin_middle_drag_for(
+                        DragTarget::SearchPlaylists,
+                        f32::from(event.position.y),
+                    );
+                }),
+            )
             .when(root.search_keyword.trim().is_empty(), |this| {
                 this.child(empty_state("search", root.tr("输入关键词进行搜索")))
             })
@@ -820,6 +857,7 @@ fn search_playlist_detail(root: &Root, cx: &mut Context<Root>) -> AnyElement {
             false,
             None,
             &root.search_playlist_detail_list,
+            DragTarget::SearchPlaylistDetail,
             cx,
         ))
         .into_any_element()
@@ -920,6 +958,7 @@ pub(crate) fn artist_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
                 detail.tracks_has_more,
                 Some(cx.entity()),
                 &root.artist_detail_list,
+                DragTarget::ArtistDetail,
                 cx,
             )
         })
@@ -977,6 +1016,7 @@ pub(crate) fn album_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
                 false,
                 None,
                 &root.album_detail_list,
+                DragTarget::AlbumDetail,
                 cx,
             )
         })

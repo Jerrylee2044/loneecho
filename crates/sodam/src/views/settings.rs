@@ -3,7 +3,7 @@
 use super::*;
 use crate::app::SAVE_TEXT;
 use crate::ui::i18n::Language;
-use gpui::MouseMoveEvent;
+use gpui::{MouseButton, MouseDownEvent, MouseMoveEvent};
 #[cfg(target_os = "linux")]
 use sodam_core::config::TitlebarMode;
 use sodam_core::EqGains;
@@ -816,9 +816,6 @@ fn page_header(title: &'static str, subtitle: Option<String>) -> AnyElement {
 
 /// 设置入口：左中栏（设置卡片式菜单）+ 右栏（三级配置页，独立滚动）。
 pub(crate) fn settings_view(root: &mut Root, cx: &mut Context<Root>) -> AnyElement {
-    if root.settings_section == SettingsSection::About {
-        root.ensure_contributors(cx);
-    }
     // 无「设置」页头；账号卡在左侧边栏底部。这里只有菜单 + 三级配置页。
     div()
         .flex()
@@ -836,6 +833,15 @@ pub(crate) fn settings_view(root: &mut Root, cx: &mut Context<Root>) -> AnyEleme
                 .min_w(px(0.0))
                 .min_h(px(0.0))
                 .overflow_y_scroll()
+                // 中键拖动滚动：按下时上报自己是这次拖动的目标，
+                // 之后移动、松开由根元素统一收。
+                .track_scroll(&root.settings_scroll)
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(|root, event: &MouseDownEvent, _window, _cx| {
+                        root.begin_middle_drag(f32::from(event.position.y));
+                    }),
+                )
                 .child(settings_page(root, cx)),
         )
         .into_any_element()
@@ -877,7 +883,7 @@ fn settings_menu(root: &Root, cx: &mut Context<Root>) -> AnyElement {
 }
 
 /// 右栏：按选中的二级菜单项渲染三级配置页。
-fn settings_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
+fn settings_page(root: &mut Root, cx: &mut Context<Root>) -> AnyElement {
     match root.settings_section {
         SettingsSection::Theme => theme_page(root, cx),
         SettingsSection::Language => language_page(root, cx),
@@ -1586,9 +1592,11 @@ fn shortcuts_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
 }
 
 /// 关于页：签名服务与配置文件（原「其他」块）+ 版本信息 + 贡献者 + 诊断日志。
-fn about_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
+fn about_page(root: &mut Root, cx: &mut Context<Root>) -> AnyElement {
     let repository = env!("CARGO_PKG_REPOSITORY");
     let contributors = root.contributors_image.clone();
+    // 渲染路径：失败态下不自动重试，否则 notify → 重绘 → 再拉取成死循环。
+    root.ensure_contributors(cx, false);
     div()
         .flex()
         .flex_col()
@@ -1668,7 +1676,7 @@ fn about_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
                                     div()
                                         .text_size(theme::Text::Tiny.size())
                                         .text_color(theme::text_muted())
-                                        .child(root.tr("Edit")),
+                                        .child(root.tr("编辑")),
                                 ),
                         ),
                 ),
@@ -1801,7 +1809,8 @@ fn about_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
                                 .text_size(theme::Text::Tiny.size())
                                 .text_color(theme::text_muted())
                                 .on_click(cx.listener(|root, _event: &ClickEvent, _window, cx| {
-                                    root.ensure_contributors(cx);
+                                    // 用户显式重试：force 越过失败态再拉一次。
+                                    root.ensure_contributors(cx, true);
                                 }))
                                 .child(root.tr("加载失败，点击重试"))
                                 .into_any_element()

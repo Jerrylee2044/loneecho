@@ -11,6 +11,7 @@ use gpui::{
     UTF16Selection, Window,
 };
 use sodam_core::{
+    config::EnvCookieFill,
     failure::UnplayableTracks,
     library::{RecommendationSource, SceneCard, SearchScope},
     log_outlet::{self, log_event, LogLevel, LogTopic},
@@ -20,11 +21,13 @@ use sodam_core::{
     },
     prefetch::PrefetchGate,
     queue::Queue,
+    quit_gate::{QuitGate, QuitRequest, QUIT_PERSIST_TIMEOUT},
     session::{AccountInfo, Session},
     PlayReporter, PlaybackEngine, Settings,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 /// 远程读取类失败的统一说法：读不到歌单、收藏、搜索、推荐都是这一句。
@@ -174,11 +177,80 @@ pub enum LoginState {
         matrix: QrMatrix,
         token: String,
         status: String,
+        /// 服务端给的二维码过期时间（Unix 秒；0 = 未知）。
+        expires_at: i64,
+        /// 服务端要求二次验证（2046）。
+        need_second_verify: bool,
+        /// 验证窗口走到哪一步了（没试 / 已打开 / 打开失败）。
+        verify_window: VerifyWindowState,
     },
     /// 已登录
     LoggedIn(#[allow(dead_code)] AccountInfo),
     /// 出错（可点重试）
     Failed(String),
+}
+
+/// 二次验证窗口的状态。分开「打开失败」是为了不让它被当成「已打开」：
+/// 失败要一直显示错误文案，也不能每轮轮询都重新开窗。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerifyWindowState {
+    /// 还没尝试打开
+    NotRequested,
+    /// 窗口已经打开，等用户在里面完成验证
+    Opened,
+    /// 打开失败过，保留错误文案，等用户重新发起登录
+    Failed,
+}
+
+/// 这一轮轮询拿到服务端状态后，验证窗口该做什么。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VerifyWindowStep {
+    /// 需要验证且还没试过：去打开
+    Open,
+    /// 已经打开过：显示「已打开」，不要重复开
+    ShowOpened,
+    /// 打开失败过：保留错误文案，不被轮询状态覆盖
+    KeepFailed,
+    /// 不需要二次验证：按轮询状态推进
+    PollStatus,
+}
+
+/// 验证窗口的状态流转：纯函数，单测直接钉住（#186）。
+pub(crate) fn verify_window_step(
+    window: VerifyWindowState,
+    need_second_verify: bool,
+) -> VerifyWindowStep {
+    match (need_second_verify, window) {
+        (false, _) => VerifyWindowStep::PollStatus,
+        (true, VerifyWindowState::NotRequested) => VerifyWindowStep::Open,
+        (true, VerifyWindowState::Opened) => VerifyWindowStep::ShowOpened,
+        (true, VerifyWindowState::Failed) => VerifyWindowStep::KeepFailed,
+    }
+}
+
+/// 把一轮轮询结果落进登录状态：更新「需要验证」标记，并按窗口状态决定文案。
+///
+/// 打开失败过的窗口保留原来的错误文案——轮询状态可以推进流程，
+/// 但不能把用户看到的失败原因顶掉（#186）。
+pub(crate) fn apply_verify_window_result(
+    window: VerifyWindowState,
+    need_second_verify: &mut bool,
+    status: &mut String,
+    poll_status: String,
+    poll_need_second_verify: bool,
+    opened_text: &str,
+) {
+    *need_second_verify = poll_need_second_verify;
+    // 打开失败过的窗口：错误文案一直留到流程结束或用户重新发起登录，
+    // 哪怕这一轮服务端没再要求二次验证（#186）。
+    if window == VerifyWindowState::Failed {
+        return;
+    }
+    match verify_window_step(window, poll_need_second_verify) {
+        VerifyWindowStep::Open | VerifyWindowStep::PollStatus => *status = poll_status,
+        VerifyWindowStep::ShowOpened => *status = opened_text.to_string(),
+        VerifyWindowStep::KeepFailed => {}
+    }
 }
 
 /// 当前播放队列来源，语义对齐官方 queue metaInfo。
@@ -224,6 +296,24 @@ pub(crate) struct BatchUpgradeProgress {
 /// 根视图状态。
 pub struct Root {
     pub nav: Nav,
+    /// 设置页内容区的滚动句柄：中键拖动时按像素改它的偏移。
+    pub settings_scroll: gpui::ScrollHandle,
+    /// 搜索页「综合」分组列表的滚动句柄。
+    pub search_groups_scroll: gpui::ScrollHandle,
+    /// 搜索页「歌曲」列表的滚动句柄（虚拟列表，像素滚动走内部 `base_handle`）。
+    pub search_tracks_scroll: gpui::UniformListScrollHandle,
+    /// 搜索页「音乐人」列表的滚动句柄。
+    pub search_artists_scroll: gpui::ScrollHandle,
+    /// 搜索页「专辑」列表的滚动句柄。
+    pub search_albums_scroll: gpui::ScrollHandle,
+    /// 搜索页「歌单」列表的滚动句柄。
+    pub search_playlists_scroll: gpui::ScrollHandle,
+    /// 我的歌单卡片网格外层的滚动句柄。
+    pub playlist_grid_scroll: gpui::ScrollHandle,
+    /// 中键拖动的状态，只算数不碰窗口（见 ui::middle_drag）。
+    pub(crate) middle_drag: ui::middle_drag::MiddleDrag,
+    /// 中键自动滚动帧循环的上一帧时刻：每帧按它算 dt。没在拖就是 `None`。
+    pub(crate) middle_drag_last_frame: Option<std::time::Instant>,
     /// 自绘标题栏拖拽区的按下锚点：按下只记录，移动超过阈值才交给合成器，
     /// 否则合成器会抢走指针，双击最大化收不到第二次按下（见 ui::titlebar）。
     pub(crate) titlebar_anchor: ui::titlebar::DragAnchor,
@@ -466,6 +556,11 @@ pub struct Root {
     /// 预取请求可能跨过一次登录变更：它的失败结论属于旧身份（比如旧账号的权益
     /// 结论），回来时不能挂起刚恢复的管线，也不能写回已作废的不可播集合。
     pub(crate) auth_epoch: u64,
+    /// 退出登录的落盘还在后台跑：这段时间里再点登出直接忽略，
+    /// 免得连点起两个保存、把状态清理跑两遍（#197）。
+    pub(crate) logout_in_flight: bool,
+    /// 登出收尾任务的句柄：退出应用时要等它写完，别让旧 Cookie 留在盘上（#197）。
+    pub(crate) logout_save_task: Option<gpui::Task<()>>,
     /// 预取管线的挂起状态（规则见 `sodam_core::prefetch`）。
     ///
     /// 与 `prefetch_cooldown_since`（逐曲冷却）正交，也与 `playback_halted`（播放落闸）
@@ -524,21 +619,121 @@ pub struct Root {
     pub settings_section: crate::views::settings::SettingsSection,
     /// 播放进度 / 时长上报（喂引擎快照，内部异步发请求）。
     pub play_reporter: PlayReporter,
+    /// 配置热重载状态机：读盘解析在后台线程，事件回 UI 线程应用（见 main.rs 心跳）。
+    pub(crate) config_reload: Arc<Mutex<sodam_core::config_watch::ReloadTracker>>,
+    /// 一次配置轮询在途标记：心跳周期短于轮询耗时，防止重叠发起。
+    pub(crate) config_poll_busy: bool,
+    /// 显式登出后的进程内记号：本次运行里不再用 `SODA_COOKIE` 把身份补回来（#192）。
+    /// 扫码登录成功或外部写入非空 Cookie 后清零；重启不保留，启动仍按环境变量走。
+    pub(crate) env_cookie_opted_out: bool,
+    /// 用户正拖着音量滑条：期间外部重载不得回弹音量（#185）。
+    pub(crate) volume_scrubbing: bool,
+    /// 启动期欠下的落盘修正：首帧后由心跳取走，在后台线程执行（#191）。
+    pub(crate) startup_write_back: Option<sodam_core::config::StartupWriteBack>,
+    /// 首拍取走后的后台落盘任务：退出时等它写完，不能 detached 放着（#191）。
+    pub(crate) startup_persist_task: Option<gpui::Task<()>>,
+    /// 启动落盘结果：后台任务写、心跳取走提示；退出时兜底写日志（#191）。
+    pub(crate) startup_persist_result: Arc<Mutex<Option<Result<(), String>>>>,
+    /// 主动退出闸门：托盘 / ⌘Q 先等启动期落盘做完再退（#198）。
+    pub(crate) quit_gate: QuitGate,
+}
+
+/// 一次配置热重载轮询的输入：后台线程按它读盘解析，事件回 UI 线程应用。
+pub(crate) struct ConfigPollRequest {
+    tracker: Arc<Mutex<sodam_core::config_watch::ReloadTracker>>,
+    path: PathBuf,
+    current: Settings,
+    /// 显式登出后为 `Skip`：热重载跳过 `SODA_COOKIE` 补全（#192）。
+    cookie_fill: EnvCookieFill,
+}
+
+impl ConfigPollRequest {
+    /// 读盘 + 解析（阻塞调用，必须放到后台线程跑，见 #185 约定）。
+    ///
+    /// 连同发起时的设置快照一起返回：UI 侧要判断轮询往返期间本地是否又有改动，
+    /// 避免拿旧快照整份覆盖用户刚保存的新值（#185 审计）。
+    pub(crate) fn poll(self) -> (sodam_core::config_watch::ReloadEvent, Settings) {
+        let now = std::time::Instant::now();
+        let self_write_recent = sodam_core::config::recent_self_write();
+        let mut tracker = self.tracker.lock().unwrap_or_else(|err| err.into_inner());
+        let event = tracker.poll(
+            &self.path,
+            &self.current,
+            now,
+            self_write_recent,
+            self.cookie_fill,
+        );
+        (event, self.current)
+    }
+}
+
+/// 启动期欠下的落盘工作：回存、首拍任务、偏好写线程刷尾。
+///
+/// 退出有两条路（`on_app_quit` 的 200ms 兜底、`Root::request_quit` 的主动等待），
+/// 要等的是同一批东西，收在这里，避免两边各写一份（#191 / #198）。
+struct PendingStartupPersist {
+    /// 退出时补做的启动回存（首拍还没取走时）。
+    write_back: Option<gpui::Task<()>>,
+    /// 心跳首拍已经交给后台的那次回存。
+    heartbeat_task: Option<gpui::Task<()>>,
+    preferences: Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    result: Arc<Mutex<Option<Result<(), String>>>>,
+}
+
+impl PendingStartupPersist {
+    /// 等全部写完；在后台线程跑，别在 UI 线程等磁盘。
+    async fn wait(self) -> Arc<Mutex<Option<Result<(), String>>>> {
+        if let Some(task) = self.write_back {
+            task.await;
+        }
+        if let Some(task) = self.heartbeat_task {
+            task.await;
+        }
+        self.preferences.await;
+        self.result
+    }
+}
+
+/// 首拍任务失败但心跳没来得及提示：把原文写进诊断日志，界面只给退出动作本身。
+fn log_startup_persist_failure(result: &Arc<Mutex<Option<Result<(), String>>>>) {
+    let error = result.lock().unwrap_or_else(|err| err.into_inner()).take();
+    if let Some(Err(error)) = error {
+        log_event(
+            LogLevel::Error,
+            LogTopic::App,
+            "failure",
+            &[("context", "启动配置回存失败"), ("detail", error.as_str())],
+        );
+    }
 }
 
 impl Root {
     /// 构造根视图：加载配置、建立会话、恢复播放模式并起心跳。
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let mut settings = Settings::load().merged_with_env();
+        let config_path = Settings::config_path();
+        // 安全加载：坏文件绝不覆盖。备份可用就从备份继续、坏文件改名保留并告诉
+        // 用户在哪；否则默认值启动并提示出错的大致位置。恢复编排收在领域层（#185）。
+        // 读盘阶段只做内存修正，备份 / 回存 / 隔离改名全部留给首帧后的后台任务（#191）。
+        // `baseline` 是读盘前记的文件指纹：热重载基线和后台回写保护共用这一份。
+        let sodam_core::config::StartupLoad {
+            settings,
+            recovery,
+            first_run,
+            baseline,
+            mut write_back,
+        } = sodam_core::config::load_for_startup(&config_path);
+        let mut settings = settings.merged_with_env();
         // 设置页的「详细日志」要覆盖启动就生效：日志出口在 `main` 里已建好，
         // 这里补上开关状态（环境变量那一路已在出口初始化时读过，两者取并集）。
         log_outlet::set_global_detailed(settings.detailed_logs);
         let engine = PlaybackEngine::with_volume(settings.volume, settings.eq);
         settings.volume = engine.snapshot().volume;
-        // 首次运行就把配置落盘：用户可以直接编辑 ~/.config/sodam/config.json
-        // 换签名服务 / 钉死设备指纹（默认值已内置，见 sodam_core::config）
-        if !Settings::config_path().exists() {
-            let _ = settings.save();
+        // 首次运行要落盘（用户可以直接编辑 config.json 换签名服务 / 钉死设备指纹）。
+        // 旧行为保存的是补过环境变量的这份设置；内容交给首帧后的后台回存，不在 UI 线程写。
+        if first_run {
+            if let Some(write_back) = write_back.as_mut() {
+                write_back.adopt_settings(settings.clone());
+            }
         }
         let theme_follows_system = ThemeKind::from_key(&settings.theme).is_none();
         let theme = ThemeKind::from_key(&settings.theme)
@@ -549,19 +744,33 @@ impl Root {
             Some(language) => (language, false),
         };
         let session = Session::new(settings.clone());
-        let status = if settings.is_ready_for_vip() {
-            if language.is_zh() {
-                language
-                    .text("已配置登录与签名服务，可以去「搜索」或「推荐」了")
-                    .to_string()
-            } else {
-                "Signed in and signer ready. Try Discover or Search.".to_string()
-            }
-        } else {
-            if language.is_zh() {
-                language.text("还没配好：请在「设置」里填 Cookie 与签名服务地址（或设 SODA_COOKIE / QISHUI_SIGNER_URL）").to_string()
-            } else {
-                "Not ready: set Cookie and signer URL in Settings (or use SODA_COOKIE / QISHUI_SIGNER_URL)".to_string()
+        // 后面还要用 recovery 判断要不要展示登录提示，先存一份（match 会移动它）。
+        let had_startup_recovery = recovery.is_some();
+        let status = match recovery {
+            Some(sodam_core::config::StartupRecovery::RecoveredFromBackup { bad_path }) => language
+                .textf(
+                    "配置文件损坏，已从备份恢复；坏文件保留在 {}",
+                    &[bad_path.display().to_string()],
+                ),
+            Some(sodam_core::config::StartupRecovery::FellBackToDefaults { error }) => language
+                .textf(
+                    "配置文件损坏（{}）：已用默认设置启动，原文件未改动",
+                    &[error],
+                ),
+            None => {
+                if settings.is_ready_for_vip() {
+                    if language.is_zh() {
+                        language
+                            .text("已配置登录与签名服务，可以去「搜索」或「推荐」了")
+                            .to_string()
+                    } else {
+                        "Signed in and signer ready. Try Discover or Search.".to_string()
+                    }
+                } else if language.is_zh() {
+                    language.text("还没配好：请在「设置」里填 Cookie 与签名服务地址（或设 SODA_COOKIE / QISHUI_SIGNER_URL）").to_string()
+                } else {
+                    "Not ready: set Cookie and signer URL in Settings (or use SODA_COOKIE / QISHUI_SIGNER_URL)".to_string()
+                }
             }
         };
         // 启动文案是写死的常量，不含接口地址，不需要脱敏；构造期也还没有 `Root`，
@@ -575,6 +784,13 @@ impl Root {
 
         let logged_in = !settings.cookie.trim().is_empty();
         let play_reporter = PlayReporter::new(settings.clone());
+        let config_reload = {
+            let mut tracker = sodam_core::config_watch::ReloadTracker::new();
+            // 以读盘前的文件状态作基线：首帧后的隔离 / 回写不算外部改动，
+            // 慢盘上也不会把「正在恢复」误报成配置文件损坏（#191）。
+            tracker.acknowledge(baseline);
+            Arc::new(Mutex::new(tracker))
+        };
         let mut root = Self {
             titlebar_anchor: std::rc::Rc::new(std::cell::Cell::new(None)),
             // 未登录只能待在设置页（登录入口在设置 → 账户）
@@ -629,6 +845,15 @@ impl Root {
             lyrics_position_seconds: 0.0,
             lyrics_position_anchor: None,
             lyrics_demo_position: None,
+            settings_scroll: gpui::ScrollHandle::new(),
+            search_groups_scroll: gpui::ScrollHandle::new(),
+            search_tracks_scroll: gpui::UniformListScrollHandle::new(),
+            search_artists_scroll: gpui::ScrollHandle::new(),
+            search_albums_scroll: gpui::ScrollHandle::new(),
+            search_playlists_scroll: gpui::ScrollHandle::new(),
+            playlist_grid_scroll: gpui::ScrollHandle::new(),
+            middle_drag: ui::middle_drag::MiddleDrag::default(),
+            middle_drag_last_frame: None,
             lyrics_scroll: gpui::ScrollHandle::new(),
             lyrics_user_scroll_until: None,
             pending_lyrics_scroll: None,
@@ -716,6 +941,8 @@ impl Root {
             prefetch_cooldown_since: HashMap::new(),
             prefetch_patrol: 0,
             auth_epoch: 0,
+            logout_in_flight: false,
+            logout_save_task: None,
             prefetch_gate: PrefetchGate::default(),
             cache_summary: (0, 0, 0, 0),
             cache_maintenance_running: false,
@@ -749,10 +976,29 @@ impl Root {
             account: None,
             engine,
             play_reporter,
+            config_reload,
+            config_poll_busy: false,
+            env_cookie_opted_out: false,
+            volume_scrubbing: false,
+            startup_write_back: write_back,
+            startup_persist_task: None,
+            startup_persist_result: Arc::new(Mutex::new(None)),
+            quit_gate: QuitGate::new(QUIT_PERSIST_TIMEOUT),
         };
-        cx.on_app_quit(|root, _cx| {
+        cx.on_app_quit(|root, cx| {
             sodam_core::flush_global();
-            root.preferences_writer.flush()
+            // 登出落盘还没回来就退出：等它写完，别让旧 Cookie 留在盘上（#197）。
+            let logout_task = root.logout_save_task.take();
+            let work = root.take_pending_startup_persist(cx);
+            async move {
+                if let Some(task) = logout_task {
+                    task.await;
+                }
+                let result = work.wait().await;
+                log_startup_persist_failure(&result);
+                // 上面的日志可能是在第一次 flush 之后写的，退出前再刷一次。
+                sodam_core::flush_global();
+            }
         })
         .detach();
         root.maintain_cache(cx);
@@ -760,7 +1006,8 @@ impl Root {
             root.refresh_account(cx);
             root.load_liked_ids(cx);
             root.start_recommendation(false, cx);
-        } else {
+        } else if !had_startup_recovery {
+            // 配置恢复提示已在状态行里：不要被登录提示覆盖，用户需要知道坏文件的去向。
             root.set_status_text(root.tr("请先在「设置 → 账户」扫码登录"));
         }
         // 开发/验证便利：`SODAM_QUERY="周杰伦" cargo run -p sodam` 启动即搜索一次
@@ -1412,6 +1659,138 @@ impl Root {
         text
     }
 
+    /// 取走启动期欠下的落盘修正（心跳首拍在首帧后调用，见 main.rs）。
+    pub(crate) fn take_startup_write_back(
+        &mut self,
+    ) -> Option<sodam_core::config::StartupWriteBack> {
+        self.startup_write_back.take()
+    }
+
+    /// 取走启动期欠下的落盘工作（回存 + 首拍任务 + 偏好刷尾）。
+    ///
+    /// 两条退出路径共用：`on_app_quit` 的兜底与 `request_quit` 的主动等待。
+    fn take_pending_startup_persist(&mut self, cx: &mut Context<Self>) -> PendingStartupPersist {
+        let write_back = self.startup_write_back.take().map(|write_back| {
+            cx.background_spawn(async move {
+                if let Err(error) = write_back.persist() {
+                    log_event(
+                        LogLevel::Error,
+                        LogTopic::App,
+                        "failure",
+                        &[
+                            ("context", "启动配置回存失败（退出前补做）"),
+                            ("detail", error.as_str()),
+                        ],
+                    );
+                }
+            })
+        });
+        PendingStartupPersist {
+            write_back,
+            heartbeat_task: self.startup_persist_task.take(),
+            preferences: Box::pin(self.preferences_writer.flush()),
+            result: self.startup_persist_result.clone(),
+        }
+    }
+
+    /// 心跳每拍检查一次启动落盘结果：失败时技术原文进日志，状态行只给人话。
+    pub(crate) fn report_startup_persist_result(&mut self, cx: &mut Context<Self>) {
+        // 正在等落盘退出：状态行要一直显示「正在保存…」，结果交给 request_quit 收尾。
+        if self.quit_gate.is_saving() {
+            return;
+        }
+        let result = self
+            .startup_persist_result
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .take();
+        if let Some(Err(error)) = result {
+            // 复用本地保存类失败的统一说法；「本次运行不受影响」留在日志上下文里。
+            let message = self.failure_text("启动配置回存失败", &error, SAVE_TEXT);
+            self.set_status_text(message);
+            cx.notify();
+        }
+    }
+
+    /// 应用内主动退出（托盘「退出」、macOS ⌘Q）：先等启动期欠下的落盘做完，
+    /// 再真正退出（#198）。
+    ///
+    /// GPUI 只给 `on_app_quit` 的等待约 200ms；慢盘 / 杀软扫描 / 写锁被占时写不完。
+    /// 这里把等待放到自己的任务里，期间界面保持可交互；再点一次退出，或等满
+    /// [`sodam_core::quit_gate::QUIT_PERSIST_TIMEOUT`]，就强制退出。
+    pub(crate) fn request_quit(&mut self, cx: &mut Context<Self>) {
+        if self.quit_gate.request(std::time::Instant::now()) == QuitRequest::QuitNow {
+            // 用户再点一次：不再等写线程，慢盘上也退得掉（#198）。
+            self.preferences_writer.abandon_on_drop();
+            cx.quit();
+            return;
+        }
+        self.set_status_text(self.tr("正在保存…"));
+        cx.notify();
+
+        // 取走这轮要等的落盘工作，后台等完再回主线程退出。
+        // 登出落盘还没回来时也算一份：慢盘上别把「已退出登录」留在内存、盘上还是旧 Cookie（#197）。
+        let logout_task = self.logout_save_task.take();
+        let work = self.take_pending_startup_persist(cx);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        cx.background_spawn(async move {
+            if let Some(task) = logout_task {
+                task.await;
+            }
+            let result = work.wait().await;
+            log_startup_persist_failure(&result);
+            let _ = done_tx.send(());
+        })
+        .detach();
+
+        // 用通道 + 轮询而不是 select：`futures-lite` 只在 Linux 目标下引入，
+        // 这里保持跨平台，20ms 一拍足够。
+        cx.spawn(async move |this, cx| {
+            loop {
+                if matches!(
+                    done_rx.try_recv(),
+                    Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected)
+                ) {
+                    break;
+                }
+                match this.update(cx, |root, _| {
+                    let timed_out = root.quit_gate.timed_out(std::time::Instant::now());
+                    if timed_out {
+                        // 超时强制退出：析构时不再等可能卡在慢 IO 的偏好写线程。
+                        root.preferences_writer.abandon_on_drop();
+                    }
+                    timed_out
+                }) {
+                    Ok(false) => {}
+                    // 到点不等了：让用户退得掉，把超时写进日志。
+                    Ok(true) => {
+                        let timeout_ms = QUIT_PERSIST_TIMEOUT.as_millis().to_string();
+                        log_event(
+                            LogLevel::Error,
+                            LogTopic::App,
+                            "quit_persist_timeout",
+                            &[("timeout_ms", timeout_ms.as_str())],
+                        );
+                        break;
+                    }
+                    // 根实体已经销毁：直接走退出。
+                    Err(_) => break,
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(20))
+                    .await;
+            }
+            // 实体不在了说明应用正在销毁，退出已经在路上，不用再补 `cx.quit()`
+            // （`AsyncApp::update` 在 app 已释放时会 panic，不能拿来兜底）。
+            // 这里用 WeakEntity 更新：实体没了就返回 Err，忽略即可。
+            let _ = this.update(cx, |root, cx| {
+                root.quit_gate.complete();
+                cx.quit();
+            });
+        })
+        .detach();
+    }
+
     /// 技术原文的唯一去处：诊断日志（默认开，写在本机日志目录）。
     /// 界面文案一律不用它——用户只看人话。
     ///
@@ -1487,9 +1866,30 @@ impl Root {
         self.push_message_with_key(kind, message, Some(ui::message::DEFAULT_DURATION), key)
     }
 
+    /// 只应用语言、不保存：设置页与热重载共用这一套应用逻辑（#185）。
+    ///
+    /// 空/未识别的值回退到跟随系统；调用方自己决定要不要回写 `settings.language`。
+    pub(crate) fn apply_language_state(&mut self, key: &str, cx: &mut Context<Self>) {
+        // 只有 macOS 要刷菜单栏；其它平台该参数用不上。
+        #[cfg(not(target_os = "macos"))]
+        let _ = cx;
+        match Language::from_key(key) {
+            Some(Language::System) | None => {
+                self.language = Language::system_locale();
+                self.language_follows_system = true;
+            }
+            Some(language) => {
+                self.language = language;
+                self.language_follows_system = false;
+            }
+        }
+        // macOS 菜单栏的标题也要跟着换语言。
+        #[cfg(target_os = "macos")]
+        crate::menus::refresh(cx, self.language);
+    }
+
     pub fn set_language(&mut self, language: Language, cx: &mut Context<Self>) {
-        self.language = language;
-        self.language_follows_system = false;
+        self.apply_language_state(language.key(), cx);
         self.settings.language = language.key().to_string();
         let save_result = self.settings.save();
         match save_result {
@@ -1506,15 +1906,16 @@ impl Root {
                 self.notify_warning_once("language-save-failed", message);
             }
         }
-        // macOS 菜单栏的标题也要跟着换语言。
-        #[cfg(target_os = "macos")]
-        crate::menus::refresh(cx, language);
         cx.notify();
     }
 }
 
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 切页或窗口失焦后，不等鼠标事件也立刻停手。
+        let current_nav = self.nav;
+        self.middle_drag
+            .sync_context(current_nav, window.is_window_active());
         // Windows 自绘标题栏（系统标题栏被 WM_NCCALCSIZE 去掉）；macOS 用系统红绿灯。
         // Linux 交给设置项：默认 auto 跟随桌面协商结果 —— GNOME 这类要求客户端装饰的
         // 桌面需要自绘，Hyprland/sway 这类平铺桌面协商成服务端装饰但不画标题栏，
@@ -1584,6 +1985,14 @@ impl Render for Root {
         theme::set_ambient_rgb(ambient_color);
         // 上一帧布局未就绪时记下的歌词对齐，在这里补做一次。
         self.flush_pending_lyrics_scroll();
+        // 中键距离驱动自动滚动（#182）：指针只决定速度，位置由这里的帧循环
+        // 每帧按 `速度 × dt` 积分。指针停住不动时没有鼠标事件，滚动全靠帧回调；
+        // 松手、切页、失焦后 `middle_drag` 被清掉，`is_scrolling` 变 false，
+        // 循环自然停住，不白烧 CPU。
+        if self.middle_drag.is_scrolling() {
+            self.advance_middle_drag_scroll(window);
+            window.request_animation_frame();
+        }
         // 歌词滚动过渡进行中：用**帧回调**驱动下一帧，而不是等背景 timer。
         //
         // `background_executor().timer(16ms)` 不是帧同步的：Windows 默认计时器精度
@@ -1689,6 +2098,29 @@ impl Render for Root {
             // 根元素持焦点 + 挂基础上下文：带谓词的快捷键绑定要有非空上下文栈才生效。
             .track_focus(&self.workspace_focus)
             .key_context(crate::shortcuts::BASE_CONTEXT)
+            // 中键按下由各个滚动区自己上报；移动、松开、窗口外松开统一在根上收，
+            // 这样鼠标拖出原来的区域也还滚同一个目标。
+            .on_mouse_move(
+                cx.listener(|root, event: &gpui::MouseMoveEvent, window, cx| {
+                    if event.pressed_button != Some(gpui::MouseButton::Middle) {
+                        root.finish_middle_drag();
+                        return;
+                    }
+                    root.middle_drag_move(f32::from(event.position.y), window, cx);
+                }),
+            )
+            .on_mouse_up(
+                gpui::MouseButton::Middle,
+                cx.listener(|root, _event: &gpui::MouseUpEvent, _window, _cx| {
+                    root.finish_middle_drag();
+                }),
+            )
+            .on_mouse_up_out(
+                gpui::MouseButton::Middle,
+                cx.listener(|root, _event: &gpui::MouseUpEvent, _window, _cx| {
+                    root.finish_middle_drag();
+                }),
+            )
             // 焦点在窗口内的任何地方都能命中：根元素是全部聚焦节点的共同祖先。
             .on_action(cx.listener(Root::focus_search))
             .bg(theme::ambient_background())
@@ -1817,5 +2249,99 @@ impl Render for Root {
             }
         }
         element
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        apply_verify_window_result, verify_window_step, VerifyWindowState, VerifyWindowStep,
+    };
+
+    const FAILED_TEXT: &str = "打开验证窗口失败，请改用官方客户端导出 Cookie。";
+    const OPENED_TEXT: &str = "验证窗口已打开；完成后这里会自动更新";
+
+    /// 验证窗口只开一次；打开失败后文案不被轮询状态盖掉（#186）。
+    #[test]
+    fn verify_window_step_opens_once_and_keeps_failure_text() {
+        assert_eq!(
+            verify_window_step(VerifyWindowState::NotRequested, true),
+            VerifyWindowStep::Open,
+            "需要验证且还没试过，这一轮去打开"
+        );
+        assert_eq!(
+            verify_window_step(VerifyWindowState::Opened, true),
+            VerifyWindowStep::ShowOpened,
+            "已经打开过，不重复开窗"
+        );
+        assert_eq!(
+            verify_window_step(VerifyWindowState::Failed, true),
+            VerifyWindowStep::KeepFailed,
+            "打开失败过，保留错误文案"
+        );
+        for window in [
+            VerifyWindowState::NotRequested,
+            VerifyWindowState::Opened,
+            VerifyWindowState::Failed,
+        ] {
+            assert_eq!(
+                verify_window_step(window, false),
+                VerifyWindowStep::PollStatus,
+                "服务端不再要求验证时按轮询状态推进"
+            );
+        }
+    }
+
+    /// 失败文案真的留在状态里：模拟失败后再来一轮要求验证的轮询（#186）。
+    #[test]
+    fn failed_window_keeps_error_text_across_polls() {
+        let mut need = true;
+        let mut status = FAILED_TEXT.to_string();
+
+        apply_verify_window_result(
+            VerifyWindowState::Failed,
+            &mut need,
+            &mut status,
+            "等待扫码…".to_string(),
+            true,
+            OPENED_TEXT,
+        );
+        assert_eq!(status, FAILED_TEXT, "失败文案不能被轮询状态盖掉");
+        assert!(need, "仍然需要二次验证");
+
+        // 服务端这一轮没再要求验证，也不该把失败原因抹掉
+        apply_verify_window_result(
+            VerifyWindowState::Failed,
+            &mut need,
+            &mut status,
+            "等待扫码…".to_string(),
+            false,
+            OPENED_TEXT,
+        );
+        assert_eq!(status, FAILED_TEXT, "失败文案留到流程结束或重新登录");
+        assert!(!need);
+
+        // 打开成功：显示「已打开」
+        apply_verify_window_result(
+            VerifyWindowState::Opened,
+            &mut need,
+            &mut status,
+            "等待扫码…".to_string(),
+            true,
+            OPENED_TEXT,
+        );
+        assert_eq!(status, OPENED_TEXT);
+
+        // 服务端不再要求验证：照常显示轮询文案
+        apply_verify_window_result(
+            VerifyWindowState::Opened,
+            &mut need,
+            &mut status,
+            "已登录".to_string(),
+            false,
+            OPENED_TEXT,
+        );
+        assert_eq!(status, "已登录");
+        assert!(!need);
     }
 }

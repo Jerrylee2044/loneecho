@@ -97,7 +97,10 @@ fn start_tray_service(
                     tray::TrayCommand::Next => {
                         cx.update(|cx| app.update(cx, |root, cx| root.next_track(cx)))
                     }
-                    tray::TrayCommand::Quit => cx.update(|cx| cx.quit()),
+                    // 先等启动期落盘做完再退（#198）；再按一次会直接退出。
+                    tray::TrayCommand::Quit => {
+                        cx.update(|cx| app.update(cx, |root, cx| root.request_quit(cx)))
+                    }
                 };
             }
 
@@ -132,6 +135,47 @@ fn start_tray_service(
             }
 
             tick += 1;
+            // 启动期欠下的落盘修正（备份 / 迁移回存 / 损坏隔离）：首帧后才动磁盘（#191）。
+            // 只有首拍能取到；之后每拍都查一次是白跑。
+            if tick == 1 {
+                // 只 spawn 后台任务：它不碰 UI，退出时主线程阻塞也能等它写完。
+                let task = cx.update(|cx| {
+                    app.update(cx, |root, cx| {
+                        let result_slot = root.startup_persist_result.clone();
+                        root.take_startup_write_back().map(|write_back| {
+                            cx.background_spawn(async move {
+                                let result = write_back.persist();
+                                *result_slot.lock().unwrap_or_else(|err| err.into_inner()) =
+                                    Some(result);
+                            })
+                        })
+                    })
+                });
+                if let Some(task) = task {
+                    // 任务存进 Root：退出时要等它写完，不能 detached 放着。
+                    cx.update(|cx| {
+                        app.update(cx, |root, _cx| root.startup_persist_task = Some(task))
+                    });
+                }
+            }
+            // 启动落盘结果：失败时心跳补一条状态行提示（后台任务不碰 UI）。
+            cx.update(|cx| app.update(cx, |root, cx| root.report_startup_persist_result(cx)));
+            // 配置热重载巡检：每 ~500ms 一次，读盘与解析放后台线程，结果回 UI 应用（#185）。
+            // 错开托盘同步的那一拍，避免同帧做两批后台活。
+            if tick % 5 == 2 {
+                let request = cx.update(|cx| app.update(cx, |root, _cx| root.begin_config_poll()));
+                if let Some(request) = request {
+                    let app = app.clone();
+                    cx.spawn(async move |cx| {
+                        let (event, snapshot) = cx
+                            .background_executor()
+                            .spawn(async move { request.poll() })
+                            .await;
+                        app.update(cx, |root, cx| root.finish_config_poll(event, snapshot, cx));
+                    })
+                    .detach();
+                }
+            }
             if tick % 5 == 0 {
                 let now = cx.update(|cx| {
                     app.update(cx, |root, _cx| {
@@ -231,7 +275,7 @@ fn main() {
             #[cfg(target_os = "macos")]
             {
                 let language = app.read(cx).language;
-                menus::install(cx, language);
+                menus::install(cx, language, app.downgrade());
             }
             // 播放快捷键：应用内三键（可在设置页重绑）。
             let settings = app.read(cx).settings.clone();

@@ -68,6 +68,7 @@ SodaM 是**汽水音乐的第三方桌面客户端**，面向 Linux / macOS / Wi
 | 平台 | 状态 |
 | --- | --- |
 | Linux / Omarchy | 已实测 |
+| Linux（Debian / Ubuntu） | 提供 `.deb` 包 |
 | macOS（Apple Silicon） | 已实测，提供 Homebrew Cask 与 `.app` 下载 |
 | Windows（x64） | 已实测，提供安装包 |
 
@@ -163,7 +164,7 @@ UI 规范见 [`docs/UI-SPEC.md`](docs/UI-SPEC.md)。
 - macOS：Apple Silicon（M 系列），macOS 12+；构建需完整版 Xcode（Metal shader 编译，
   仅装 Command Line Tools 会报 `xcrun: unable to find utility "metal"`）
 - Windows：Windows 10+ x64；源码构建需 VS 2022 Build Tools（C++ 工作负载）
-- Chromium / Chrome / Edge 等浏览器用于扫码登录签名页
+- 系统默认浏览器用于扫码登录的二次验证页（无需安装 Chromium/Chrome）
 - `libresoda` 与 `sodam` 同级 clone（可选）：本地联调时可用
   `[patch."https://github.com/sodahub-org/libresoda"]` 指向 `../libresoda`，
   改动 libresoda 即时生效，无需等新版本。
@@ -238,6 +239,7 @@ SodaM 默认内置一个公共签名服务，未部署 `libmssdk` 的用户也�
 | `SODAM_VOLUME` | 启动音量覆盖，范围 0–1；开发测试可设为 `0` |
 | `SODAM_CONFIG_PATH` | 使用独立配置文件，便于隔离测试实例 |
 | `SODAM_CACHE_DIR` | 缓存根目录，其下使用 `audio/`、`covers/`；可放到其他磁盘 |
+| `SODAM_SLOW_SAVE_MS` | 只用调试构建：每次保存配置前先睡这么多毫秒，用来验收慢盘/写锁占用时界面不冻结（#197） |
 
 ## 开发
 
@@ -251,9 +253,78 @@ scripts/run.sh     # 启动 GUI，带 MemoryMax 护栏
 
 不要在 GUI 运行时编译；不要绕过脚本反复执行全量 cargo 构建。
 
+## Debian / Ubuntu 下载安装
+
+从 `v0.4.0` 起，SodaM 的 GitHub Release 同时提供 Debian / Ubuntu 的 `.deb` 包。
+`v0.3.8` 及更早的 Release **没有** `.deb`；下面用 GitHub API 取最新 Release 的版本号。
+
+### 1. 确认系统架构
+
+```bash
+dpkg --print-architecture   # amd64 或 arm64
+```
+
+- `x86_64` 机器对应 `amd64`
+- `aarch64` 机器对应 `arm64`
+
+### 2. 下载并校验安装包
+
+```bash
+mkdir -p /tmp/sodam-install
+cd /tmp/sodam-install
+
+arch=$(dpkg --print-architecture)
+# 最新 Release 的版本号（v0.4.0 起提供 deb；更早的没有）
+version=$(curl -fsSL https://api.github.com/repos/sodahub-org/sodam/releases/latest \
+  | grep -o '"tag_name": *"v[^"]*"' | head -1 | sed 's/.*"v//; s/"$//')
+base_url=https://github.com/sodahub-org/sodam/releases/download/v${version}
+
+curl -fLO ${base_url}/SHA256SUMS
+curl -fLO ${base_url}/sodam_${version}_${arch}.deb
+grep "sodam_${version}_${arch}\.deb$" SHA256SUMS | sha256sum -c -
+```
+
+校验输出必须包含 `OK`：
+
+```text
+sodam_${version}_amd64.deb: OK
+```
+
+### 3. 安装
+
+```bash
+sudo apt install ./sodam_${version}_${arch}.deb
+```
+
+`apt` 会自动处理 `libasound2`、`libdbus-1-3`、`libfontconfig1`、`libfreetype6`、
+`libxkbcommon0`、`libxcb1`、`hicolor-icon-theme` 等依赖。包未做 GPG 签名、也没有
+apt 源，所以用 `apt install ./包路径` 直接装本地文件，不要先 `apt update` 再按包名安装。
+
+> Debian 12/13 与 Ubuntu 24.04+ 的 `t64` 包都带传统包名的 `Provides:`，上面这些依赖名都能满足。
+
+### 4. 启动
+
+命令行启动：
+
+```bash
+sodam
+```
+
+也可以从桌面环境的应用菜单中启动 **SodaM**。首次启动会进入设置页，按提示扫码登录后即可使用。
+
+### 升级与卸载
+
+```bash
+# 升级：从 Releases 下载新版本 .deb 后覆盖安装
+sudo apt install ./sodam_<新版本>_${arch}.deb
+
+# 卸载；~/.config/sodam 里的配置和登录状态会保留
+sudo apt remove sodam
+```
+
 ## Arch Linux 下载安装
 
-SodaM 的 GitHub Release 提供 Arch Linux `pacman` 安装包，当前版本为 [`v0.3.8`](https://github.com/sodahub-org/sodam/releases/tag/v0.3.8)。
+SodaM 的 GitHub Release 提供 Arch Linux `pacman` 安装包，当前版本为 [`v0.4.0`](https://github.com/sodahub-org/sodam/releases/tag/v0.4.0)。
 
 ### 1. 确认系统架构
 
@@ -271,7 +342,7 @@ mkdir -p /tmp/sodam-install
 cd /tmp/sodam-install
 
 arch=$(uname -m)
-version=0.3.8
+version=0.4.0
 base_url=https://github.com/sodahub-org/sodam/releases/download/v${version}
 
 curl -fLO ${base_url}/SHA256SUMS
@@ -282,7 +353,7 @@ grep "sodam-${version}-1-${arch}\.pkg\.tar\.zst$" SHA256SUMS | sha256sum -c -
 校验输出必须包含 `OK`：
 
 ```text
-sodam-0.3.8-1-x86_64.pkg.tar.zst: OK
+sodam-0.4.0-1-x86_64.pkg.tar.zst: OK
 ```
 
 ### 3. 安装
@@ -330,7 +401,7 @@ sudo pacman -Syu               # 之后随系统一起升级
 ## macOS 下载安装（Apple Silicon）
 
 macOS 版已在 Apple Silicon（M 系列）真机实测。当前版本为
-[`v0.3.8`](https://github.com/sodahub-org/sodam/releases/tag/v0.3.8)，两种安装方式任选。
+[`v0.4.0`](https://github.com/sodahub-org/sodam/releases/tag/v0.4.0)，两种安装方式任选。
 
 ### 方式一：Homebrew（推荐，预编译 `.app`）
 
@@ -358,7 +429,7 @@ Homebrew 按架构要求拦下。安装后如仍被 Gatekeeper 拦截，用下�
 mkdir -p /tmp/sodam-install
 cd /tmp/sodam-install
 
-version=0.3.8
+version=0.4.0
 base_url=https://github.com/sodahub-org/sodam/releases/download/v${version}
 
 curl -fLO ${base_url}/SHA256SUMS
@@ -369,7 +440,7 @@ grep "sodam-${version}-macos-aarch64\.zip$" SHA256SUMS | shasum -a 256 -c -
 校验输出必须包含 `OK`：
 
 ```text
-sodam-0.3.8-macos-aarch64.zip: OK
+sodam-0.3.9-macos-aarch64.zip: OK
 ```
 
 #### 2. 安装
@@ -406,14 +477,30 @@ open -a SodaM
 
 Windows 版已在 Windows 10/11 x64 真机实测，GitHub Release 提供 Inno Setup 安装包
 （按用户安装，无需管理员权限），当前版本为
-[`v0.3.8`](https://github.com/sodahub-org/sodam/releases/tag/v0.3.8)。
+[`v0.4.0`](https://github.com/sodahub-org/sodam/releases/tag/v0.4.0)。
 
-### 1. 下载并校验
+### 方式一：winget（推荐）
+
+Windows 10/11 自带的 winget 会从官方包仓库安装同一个 Inno Setup 安装包：
+
+```powershell
+winget install --id sodahub-org.SodaM -e
+winget upgrade --id sodahub-org.SodaM -e
+```
+
+- 包名是 `sodahub-org.SodaM`，收录在官方的
+  [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs)（社区提交、微软审核合并）。
+- `winget show --id sodahub-org.SodaM -e` 可以核对版本、安装器类型与发行信息。
+- 新版本通常由官方 `wingetbot` 自动跟进；如果它还没跟上最新 Release，用下面的方式二直接装最新版。
+
+### 方式二：下载安装包
+
+#### 1. 下载并校验
 
 ```powershell
 mkdir C:\sodam-install; cd C:\sodam-install
 
-$version = "0.3.8"
+$version = "0.4.0"
 $base = "https://github.com/sodahub-org/sodam/releases/download/v$version"
 
 Invoke-WebRequest "$base/SHA256SUMS" -OutFile SHA256SUMS
@@ -426,14 +513,14 @@ if ($expected -ne $actual) { throw "SHA256 mismatch!" } else { "SHA256 OK" }
 
 输出 `SHA256 OK` 即校验通过。
 
-### 2. 安装
+#### 2. 安装
 
 双击运行安装包，按向导完成安装：
 
 - 默认安装目录 `%LOCALAPPDATA%\Programs\SodaM`
 - 自动创建开始菜单快捷方式，可选创建桌面快捷方式
 
-### 3. 首次启动（SmartScreen 提示）
+#### 3. 首次启动（SmartScreen 提示）
 
 当前发行包未经代码签名，首次运行可能弹出
 **「Windows 已保护你的电脑」**：点击「更多信息」→「仍要运行」即可。
@@ -443,9 +530,15 @@ if ($expected -ne $actual) { throw "SHA256 mismatch!" } else { "SHA256 OK" }
 
 ### 卸载
 
-在「设置 → 应用」或「控制面板 → 程序和功能」中卸载 SodaM。
+在「设置 → 应用」或「控制面板 → 程序和功能」中卸载 SodaM；用 winget 装的也可以：
+
+```powershell
+winget uninstall --id sodahub-org.SodaM -e
+```
 
 ## 打包
+
+### Arch Linux（pacman）
 
 ```bash
 cd packaging/arch
@@ -453,13 +546,26 @@ PKGEXT='.pkg.tar.zst' makepkg -f
 sudo pacman -U ./sodam-<version>-<arch>.pkg.tar.zst
 ```
 
-安装后会得到：
+### Debian / Ubuntu（deb）
+
+从已构建的 release 二进制直接打包，不重新编译：
+
+```bash
+cargo build --release --locked --workspace
+packaging/deb/make-deb.sh <x86_64|aarch64>
+sudo apt install ./sodam_<version>_<amd64|arm64>.deb
+```
+
+细节见 [`packaging/deb/README.md`](packaging/deb/README.md)。两种包装完都会得到：
 
 ```text
 /usr/bin/sodam
 /usr/share/applications/sodam.desktop
 /usr/share/icons/hicolor/256x256/apps/sodam.png
 ```
+
+`.deb` 另外带 `/usr/share/doc/sodam/{copyright,LICENSE,NOTICE.md}`，pacman 包对应的是
+`/usr/share/licenses/sodam/LICENSE`。
 
 ## 文档
 

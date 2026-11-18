@@ -5,9 +5,9 @@ use super::*;
 
 /// 歌词排版沿用 SodaM 原本的样式：字号 `Text::Large`、行高 32、每句间距 32。
 /// 不采用官方客户端的 24px/34 字号行高——那套在 SodaM 里显得过大。
-const LYRIC_LINE_HEIGHT: f32 = 32.0;
+pub(crate) const LYRIC_LINE_HEIGHT: f32 = 32.0;
 /// 相邻两句之间的间距（单句文本 32 + 间距 32 = 原来每行 64 的效果）。
-const LYRIC_ROW_GAP: f32 = 32.0;
+pub(crate) const LYRIC_ROW_GAP: f32 = 32.0;
 
 /// 一行歌词的逐字高亮文字。
 ///
@@ -431,6 +431,9 @@ pub(crate) fn lyrics_view(root: &Root, window: &Window, cx: &mut Context<Root>) 
     let lyrics_viewport_height =
         (f32::from(window.viewport_size().height) - theme::PLAYER_H).max(360.0);
     let lyric_padding = lyrics_viewport_height / 2.0;
+    // 底部 padding 额外加上「跟随线偏移」：最后一句也要能滚到跟随线
+    // （视口中心上方一行），否则短歌词的结尾停不到目标位置。
+    let lyric_bottom_padding = lyric_padding + LYRIC_ROW_GAP + LYRIC_LINE_HEIGHT + 16.0;
     let list = if root.lyrics.is_empty() {
         None
     } else {
@@ -445,17 +448,22 @@ pub(crate) fn lyrics_view(root: &Root, window: &Window, cx: &mut Context<Root>) 
                 .flex_1()
                 .min_h(px(0.0))
                 .pt(px(lyric_padding))
-                .pb(px(lyric_padding))
+                .pb(px(lyric_bottom_padding))
                 .overflow_y_scroll()
                 .track_scroll(&root.lyrics_scroll)
                 // 用户滚动时暂停自动跟随 5 秒（官方行为），否则往回翻会被拽回当前句。
                 .on_scroll_wheel(cx.listener(|root, _event, _window, cx| {
-                    root.lyrics_user_scroll_until =
-                        Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
-                    // 用户已经自己滚了，过渡动画必须让位，否则会和手动滚动打架。
-                    root.cancel_lyrics_scroll_tween();
+                    root.pause_lyrics_follow();
                     cx.notify();
                 }))
+                // 中键按下时上报自己是这次拖动的目标；之后移动、松开由根元素统一收。
+                // 走和滚轮同一个入口，所以拖动期间也不会被跟唱或过渡动画拽回去。
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(|root, event: &MouseDownEvent, _window, _cx| {
+                        root.begin_middle_drag_lyrics(f32::from(event.position.y));
+                    }),
+                )
                 .children(lines.iter().enumerate().map(|(index, line)| {
                     let next_start = lines.get(index + 1).map(|next| next.start_seconds);
                     // 本行此刻是否"正在唱"：区间是 `[start, 下一句开始)`。

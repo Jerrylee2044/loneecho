@@ -338,8 +338,8 @@ pub(crate) fn account_section(root: &Root, cx: &mut Context<Root>) -> AnyElement
         .filter(|url| !url.trim().is_empty())
         .and_then(|url| root.cover_of(&url));
 
-    // 侧栏底部账号条：不带卡片外壳。侧栏窄，昵称/ID 必须截断省略，
-    // 否则被挤成逐字竖排；头像与按钮取紧凑尺寸。
+    // 侧栏底部账号条：不带卡片外壳。头像 + 昵称一行，退出登录为纯图标按钮；
+    // 不显示用户 ID，昵称不截断（nowrap 单行，极端长度自然溢出也不省略）。
     div()
         .flex()
         .flex_row()
@@ -357,10 +357,10 @@ pub(crate) fn account_section(root: &Root, cx: &mut Context<Root>) -> AnyElement
                 .flex_col()
                 .flex_1()
                 .min_w(px(0.0))
-                .gap(px(theme::space::XS))
+                .gap(px(2.0))
                 .child(
                     div()
-                        .truncate()
+                        .whitespace_nowrap()
                         .text_size(theme::Text::Small.size())
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme::text())
@@ -373,61 +373,13 @@ pub(crate) fn account_section(root: &Root, cx: &mut Context<Root>) -> AnyElement
                             root.tr("未登录").to_string()
                         }),
                 )
-                .child(
-                    div()
-                        .truncate()
-                        .text_size(theme::Text::Small.size())
-                        .text_color(theme::text_muted())
-                        .child(if logged_in {
-                            match &root.account {
-                                Some(info) => {
-                                    let vip = if info.vip {
-                                        root.tr("VIP")
-                                    } else {
-                                        root.tr("非 VIP")
-                                    };
-                                    root.localized(
-                                        "用户 {} · {}",
-                                        &[info.user_id.to_string(), vip.to_string()],
-                                    )
-                                }
-                                None => root.tr("正在读取账号信息…").to_string(),
-                            }
-                        } else {
-                            root.tr("登录后才能使用搜索、歌单与播放").to_string()
-                        }),
-                )
                 .when(!logged_in, |this| {
                     this.child(
                         div()
-                            .id("go-login")
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(theme::space::SM))
-                            .h(px(theme::size::CONTROL))
-                            .px(px(theme::space::LG))
-                            .mt(px(theme::space::SM))
-                            .rounded(px(theme::radius::PILL))
-                            .bg(theme::accent())
-                            .cursor_pointer()
-                            .hover(|style| style.opacity(0.9))
-                            .on_click(cx.listener(|root, _event: &ClickEvent, _window, cx| {
-                                root.login_modal_open = true;
-                                root.start_login(cx);
-                            }))
-                            .child(
-                                svg()
-                                    .path(icons::path("log-in"))
-                                    .size(px(theme::ICON))
-                                    .text_color(theme::accent_foreground()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(theme::Text::Small.size())
-                                    .text_color(theme::accent_foreground())
-                                    .child(root.tr("去登录")),
-                            ),
+                            .truncate()
+                            .text_size(theme::Text::Tiny.size())
+                            .text_color(theme::text_muted())
+                            .child(root.tr("登录后才能使用搜索、歌单与播放")),
                     )
                 }),
         )
@@ -435,31 +387,54 @@ pub(crate) fn account_section(root: &Root, cx: &mut Context<Root>) -> AnyElement
             this.child(
                 div()
                     .id("logout")
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(28.0))
+                    .rounded_full()
+                    .cursor_pointer()
+                    .text_color(theme::text_muted())
+                    .hover(|style| {
+                        style
+                            .bg(theme::surface_selected())
+                            .text_color(theme::text())
+                    })
+                    .on_click(cx.listener(|root, _event: &ClickEvent, _window, cx| {
+                        root.logout(cx);
+                    }))
+                    .child(svg().path(icons::path("x")).size(px(theme::ICON_SM))),
+            )
+        })
+        .when(!logged_in, |this| {
+            this.child(
+                div()
+                    .id("go-login")
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap(px(theme::space::SM))
-                    .flex_none()
                     .h(px(theme::size::CONTROL_SM))
                     .px(px(theme::space::MD))
                     .rounded(px(theme::radius::PILL))
-                    .bg(theme::surface_hover())
+                    .bg(theme::accent())
                     .cursor_pointer()
-                    .hover(|style| style.bg(theme::surface_selected()))
+                    .hover(|style| style.opacity(0.9))
                     .on_click(cx.listener(|root, _event: &ClickEvent, _window, cx| {
-                        root.logout(cx);
+                        root.login_modal_open = true;
+                        root.start_login(cx);
                     }))
                     .child(
                         svg()
-                            .path(icons::path("x"))
-                            .size(px(theme::ICON))
-                            .text_color(theme::text_muted()),
+                            .path(icons::path("log-in"))
+                            .size(px(theme::ICON_SM))
+                            .text_color(theme::accent_foreground()),
                     )
                     .child(
                         div()
-                            .text_size(theme::Text::Small.size())
-                            .text_color(theme::text_muted())
-                            .child(root.tr("退出登录")),
+                            .text_size(theme::Text::Tiny.size())
+                            .text_color(theme::accent_foreground())
+                            .child(root.tr("去登录")),
                     ),
             )
         })

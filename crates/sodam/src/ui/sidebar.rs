@@ -151,14 +151,17 @@ pub fn render(root: &Root, cx: &mut Context<Root>, own_titlebar: bool) -> impl I
         .collect();
     // 设置入口移到自绘标题栏（齿轮图标）。macOS 用系统红绿灯、没有自绘标题栏，
     // 保留侧栏入口，否则 macOS 上没有进设置页的路。
-    let footer_items: Vec<AnyElement> = if cfg!(target_os = "macos") {
-        [Nav::Settings]
-            .into_iter()
-            .map(|nav| nav_row(nav, labels[&nav].clone(), nav == current, cx))
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // 账号卡常驻侧栏底部（原设置入口位置），任意页面都可见。
+    let mut footer_items: Vec<AnyElement> = Vec::new();
+    if cfg!(target_os = "macos") {
+        footer_items.push(nav_row(
+            Nav::Settings,
+            labels[&Nav::Settings].clone(),
+            current == Nav::Settings,
+            cx,
+        ));
+    }
+    footer_items.push(crate::views::settings::account_section(root, cx));
 
     div()
         .flex()

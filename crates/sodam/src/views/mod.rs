@@ -1233,7 +1233,7 @@ pub fn render(root: &mut Root, window: &Window, cx: &mut Context<Root>) -> impl 
                             .gap(px(theme::space::LG))
                             .child(
                                 div()
-                                    .w(px(230.0))
+                                    .w(px(170.0))
                                     .flex_none()
                                     .h(px(64.0))
                                     .px(px(theme::space::MD + theme::space::SM))

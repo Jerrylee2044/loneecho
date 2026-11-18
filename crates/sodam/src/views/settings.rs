@@ -890,7 +890,7 @@ pub(crate) fn settings_view(root: &mut Root, cx: &mut Context<Root>) -> AnyEleme
 /// 选中项只用强调色文字表示；菜单文字与上方「设置」标题左对齐。
 fn settings_menu(root: &Root, cx: &mut Context<Root>) -> AnyElement {
     div()
-        .w(px(230.0))
+        .w(px(170.0))
         .flex_none()
         .flex()
         .flex_col()

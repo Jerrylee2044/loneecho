@@ -368,14 +368,6 @@ pub(crate) fn section(root: &Root, cx: &mut Context<Root>) -> AnyElement {
                 }))
                 .flex()
                 .flex_col()
-                .rounded(px(theme::radius::CARD))
-                .bg(theme::surface_elevated())
-                .border_1()
-                .border_color(if capturing {
-                    theme::accent()
-                } else {
-                    theme::border()
-                })
                 .children(rows),
         )
         .into_any_element()

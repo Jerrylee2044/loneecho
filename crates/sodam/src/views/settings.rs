@@ -586,8 +586,6 @@ fn search_history_section(root: &Root, cx: &mut Context<Root>) -> AnyElement {
             .gap(px(theme::space::LG))
             .px(px(theme::space::MD))
             .py(px(theme::space::SM))
-            .rounded(px(theme::radius::ROW))
-            .bg(theme::surface())
             .child(
                 div()
                     .text_size(theme::Text::Body.size())
@@ -816,15 +814,12 @@ impl SettingsSection {
 
 /// 三级页里的分组卡片：圆角描边容器，可选内标题（参考官方客户端的分组卡）。
 fn settings_card(title_key: Option<&'static str>) -> gpui::Div {
+    // 纯布局分组: 无卡片外壳 (无圆角/背景/描边), 内容直接平铺在页面上。
     let mut card = div()
         .flex()
         .flex_col()
         .gap(px(theme::space::SM))
-        .p(px(theme::space::MD))
-        .rounded(px(theme::radius::CARD))
-        .bg(theme::surface_elevated())
-        .border_1()
-        .border_color(theme::border());
+        .py(px(theme::space::MD));
     if let Some(key) = title_key {
         card = card.child(
             div()
@@ -1723,11 +1718,6 @@ fn about_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
                 .flex()
                 .flex_col()
                 .gap(px(theme::space::MD))
-                .p(px(theme::space::MD))
-                .rounded(px(theme::radius::CARD))
-                .bg(theme::surface_elevated())
-                .border_1()
-                .border_color(theme::border())
                 .child(
                     div()
                         .flex()

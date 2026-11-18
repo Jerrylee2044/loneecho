@@ -736,7 +736,6 @@ fn diagnostic_log_section(root: &Root, cx: &mut Context<Root>) -> AnyElement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum SettingsSection {
     #[default]
-    Account,
     Theme,
     Language,
     SearchHistory,
@@ -752,7 +751,6 @@ impl SettingsSection {
     /// 菜单展示顺序。窗口控制只对 Linux 有意义（macOS/Windows 由系统负责装饰）。
     fn all() -> &'static [SettingsSection] {
         &[
-            Self::Account,
             Self::Theme,
             Self::Language,
             Self::SearchHistory,
@@ -768,7 +766,6 @@ impl SettingsSection {
 
     fn id(self) -> &'static str {
         match self {
-            Self::Account => "account",
             Self::Theme => "theme",
             Self::Language => "language",
             Self::SearchHistory => "search-history",
@@ -783,7 +780,6 @@ impl SettingsSection {
 
     fn label_key(self) -> &'static str {
         match self {
-            Self::Account => "账号信息",
             Self::Theme => "主题",
             Self::Language => "语言",
             Self::SearchHistory => "搜索历史",
@@ -861,6 +857,24 @@ pub(crate) fn settings_view(root: &mut Root, cx: &mut Context<Root>) -> AnyEleme
                 .min_w(px(0.0))
                 .min_h(px(0.0))
                 .overflow_y_scroll()
+                .child(
+                    // 页头行：左侧「设置」标题，右侧常驻账号卡（任意分类下都可见）。
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .gap(px(theme::space::LG))
+                        .child(div().flex_1().min_w(px(0.0)).child(page_header(
+                            root.tr("设置"),
+                            Some(root.tr("管理账号、外观与播放").to_string()),
+                        )))
+                        .child(
+                            div()
+                                .w(px(380.0))
+                                .flex_none()
+                                .child(account_section(root, cx)),
+                        ),
+                )
                 .child(settings_page(root, cx)),
         )
         .into_any_element()
@@ -920,7 +934,6 @@ fn settings_menu(root: &Root, cx: &mut Context<Root>) -> AnyElement {
 /// 右栏：按选中的二级菜单项渲染三级配置页。
 fn settings_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
     match root.settings_section {
-        SettingsSection::Account => account_page(root, cx),
         SettingsSection::Theme => theme_page(root, cx),
         SettingsSection::Language => language_page(root, cx),
         SettingsSection::SearchHistory => search_history_page(root, cx),
@@ -932,100 +945,6 @@ fn settings_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
         SettingsSection::About => about_page(root, cx),
     }
 }
-
-/// 账号页：账号卡片 + 签名服务与配置文件（原「其他」块）。
-fn account_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(theme::space::LG))
-        .child(page_header(
-            root.tr("账号信息"),
-            Some(root.tr("签名服务、设备指纹与登录状态").to_string()),
-        ))
-        .child(account_section(root, cx))
-        .child(
-            settings_card(Some(root.tr("其他")))
-                .child(
-                    div()
-                        .text_size(theme::Text::Small.size())
-                        .text_color(theme::text_muted())
-                        .child(if root.language.resolved().is_zh() {
-                            root.localized(
-                                "签名服务：{}",
-                                &[if root.settings.signer_url.trim().is_empty() {
-                                    root.tr("（未配置）").to_string()
-                                } else {
-                                    root.settings.signer_url.trim().to_string()
-                                }],
-                            )
-                        } else {
-                            format!(
-                                "Signer: {}",
-                                if root.settings.signer_url.trim().is_empty() {
-                                    root.tr("（未配置）")
-                                } else {
-                                    root.settings.signer_url.trim()
-                                }
-                            )
-                        }),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(theme::space::SM))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .truncate()
-                                .text_size(theme::Text::Small.size())
-                                .text_color(theme::text_muted())
-                                .child(if root.language.resolved().is_zh() {
-                                    root.localized(
-                                        "配置：{}",
-                                        &[sodam_core::Settings::config_path()
-                                            .display()
-                                            .to_string()],
-                                    )
-                                } else {
-                                    format!(
-                                        "Config: {}",
-                                        sodam_core::Settings::config_path().display()
-                                    )
-                                }),
-                        )
-                        .child(
-                            div()
-                                .id("edit-config")
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_center()
-                                .flex_none()
-                                .h(px(theme::size::CONTROL_SM))
-                                .px(px(theme::space::MD))
-                                .rounded(px(theme::radius::ROW))
-                                .bg(theme::surface_elevated())
-                                .cursor_pointer()
-                                .hover(|style| style.bg(theme::surface_hover()))
-                                .on_click(cx.listener(|root, _event: &ClickEvent, _window, cx| {
-                                    root.open_config_file(cx);
-                                }))
-                                .child(
-                                    div()
-                                        .text_size(theme::Text::Tiny.size())
-                                        .text_color(theme::text_muted())
-                                        .child(root.tr("Edit")),
-                                ),
-                        ),
-                ),
-        )
-        .into_any_element()
-}
-
 /// 主题页：跟随系统 / 深色 / 浅色。
 fn theme_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
     let subtitle = if root.theme_follows_system {
@@ -1725,7 +1644,7 @@ fn shortcuts_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
         .into_any_element()
 }
 
-/// 关于页：版本与上游信息 + 贡献者 + 诊断日志。
+/// 关于页：签名服务与配置文件（原「其他」块）+ 版本信息 + 贡献者 + 诊断日志。
 fn about_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
     let repository = env!("CARGO_PKG_REPOSITORY");
     let contributors = root.contributors_image.clone();
@@ -1734,6 +1653,85 @@ fn about_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
         .flex_col()
         .gap(px(theme::space::LG))
         .child(page_header(root.tr("关于"), None))
+        .child(
+            settings_card(Some(root.tr("其他")))
+                .child(
+                    div()
+                        .text_size(theme::Text::Small.size())
+                        .text_color(theme::text_muted())
+                        .child(if root.language.resolved().is_zh() {
+                            root.localized(
+                                "签名服务：{}",
+                                &[if root.settings.signer_url.trim().is_empty() {
+                                    root.tr("（未配置）").to_string()
+                                } else {
+                                    root.settings.signer_url.trim().to_string()
+                                }],
+                            )
+                        } else {
+                            format!(
+                                "Signer: {}",
+                                if root.settings.signer_url.trim().is_empty() {
+                                    root.tr("（未配置）")
+                                } else {
+                                    root.settings.signer_url.trim()
+                                }
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(theme::space::SM))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .truncate()
+                                .text_size(theme::Text::Small.size())
+                                .text_color(theme::text_muted())
+                                .child(if root.language.resolved().is_zh() {
+                                    root.localized(
+                                        "配置：{}",
+                                        &[sodam_core::Settings::config_path()
+                                            .display()
+                                            .to_string()],
+                                    )
+                                } else {
+                                    format!(
+                                        "Config: {}",
+                                        sodam_core::Settings::config_path().display()
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id("edit-config")
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_center()
+                                .flex_none()
+                                .h(px(theme::size::CONTROL_SM))
+                                .px(px(theme::space::MD))
+                                .rounded(px(theme::radius::ROW))
+                                .bg(theme::surface_elevated())
+                                .cursor_pointer()
+                                .hover(|style| style.bg(theme::surface_hover()))
+                                .on_click(cx.listener(|root, _event: &ClickEvent, _window, cx| {
+                                    root.open_config_file(cx);
+                                }))
+                                .child(
+                                    div()
+                                        .text_size(theme::Text::Tiny.size())
+                                        .text_color(theme::text_muted())
+                                        .child(root.tr("Edit")),
+                                ),
+                        ),
+                ),
+        )
         .child(
             div()
                 .id("about-footer")

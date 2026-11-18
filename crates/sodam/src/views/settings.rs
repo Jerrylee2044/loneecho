@@ -843,26 +843,49 @@ pub(crate) fn settings_view(root: &mut Root, cx: &mut Context<Root>) -> AnyEleme
     }
     div()
         .flex()
-        .flex_row()
+        .flex_col()
         .flex_1()
         .min_h(px(0.0))
         .gap(px(theme::space::LG))
-        .child(settings_menu(root, cx))
+        // 页头行：左侧「设置」标题（与中栏菜单同宽），右侧账号卡通栏——
+        // 账号信息在任意分类下都常驻可见。
         .child(
             div()
-                .id("settings-scroll")
                 .flex()
-                .flex_col()
-                .flex_1()
-                .min_w(px(0.0))
-                .min_h(px(0.0))
-                .overflow_y_scroll()
+                .flex_row()
+                .items_start()
+                .gap(px(theme::space::LG))
+                .child(div().w(px(230.0)).flex_none().child(page_header(
+                    root.tr("设置"),
+                    Some(root.tr("管理账号、外观与播放").to_string()),
+                )))
                 .child(
-                    // 页头：账号卡通栏横在内容区顶部，任意分类下常驻可见；
-                    // 「设置」标题由中栏菜单卡片提供，这里不再重复。
-                    account_section(root, cx),
-                )
-                .child(settings_page(root, cx)),
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .child(account_section(root, cx)),
+                ),
+        )
+        // 主体行：中栏二级菜单 + 右栏三级配置页（独立滚动）。
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_h(px(0.0))
+                .gap(px(theme::space::LG))
+                .child(settings_menu(root, cx))
+                .child(
+                    div()
+                        .id("settings-scroll")
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .min_h(px(0.0))
+                        .overflow_y_scroll()
+                        .child(settings_page(root, cx)),
+                ),
         )
         .into_any_element()
 }
@@ -881,15 +904,6 @@ fn settings_menu(root: &Root, cx: &mut Context<Root>) -> AnyElement {
         .bg(theme::surface_elevated())
         .border_1()
         .border_color(theme::border())
-        .child(
-            div()
-                .px(px(theme::space::SM))
-                .py(px(theme::space::MD))
-                .text_size(theme::Text::Large.size())
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme::text())
-                .child(root.tr("设置")),
-        )
         .children(SettingsSection::all().iter().map(|section| {
             let selected = *section == root.settings_section;
             div()

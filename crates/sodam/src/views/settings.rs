@@ -403,23 +403,30 @@ pub(crate) fn account_section(root: &Root, cx: &mut Context<Root>) -> AnyElement
                     .on_click(cx.listener(|root, _event: &ClickEvent, _window, cx| {
                         root.logout(cx);
                     }))
-                    .child(svg().path(icons::path("x")).size(px(theme::ICON_SM))),
+                    .child(
+                        svg()
+                            .path(icons::path("x"))
+                            .size(px(theme::ICON_SM))
+                            .text_color(theme::text_muted()),
+                    ),
             )
         })
         .when(!logged_in, |this| {
             this.child(
                 div()
                     .id("go-login")
+                    .flex_none()
                     .flex()
-                    .flex_row()
                     .items_center()
-                    .gap(px(theme::space::SM))
-                    .h(px(theme::size::CONTROL_SM))
-                    .px(px(theme::space::MD))
-                    .rounded(px(theme::radius::PILL))
-                    .bg(theme::accent())
+                    .justify_center()
+                    .size(px(28.0))
+                    .rounded_full()
                     .cursor_pointer()
-                    .hover(|style| style.opacity(0.9))
+                    .hover(|style| {
+                        style
+                            .bg(theme::surface_selected())
+                            .text_color(theme::text())
+                    })
                     .on_click(cx.listener(|root, _event: &ClickEvent, _window, cx| {
                         root.login_modal_open = true;
                         root.start_login(cx);
@@ -428,13 +435,7 @@ pub(crate) fn account_section(root: &Root, cx: &mut Context<Root>) -> AnyElement
                         svg()
                             .path(icons::path("log-in"))
                             .size(px(theme::ICON_SM))
-                            .text_color(theme::accent_foreground()),
-                    )
-                    .child(
-                        div()
-                            .text_size(theme::Text::Tiny.size())
-                            .text_color(theme::accent_foreground())
-                            .child(root.tr("去登录")),
+                            .text_color(theme::text_muted()),
                     ),
             )
         })

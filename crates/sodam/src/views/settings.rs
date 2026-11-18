@@ -360,10 +360,20 @@ pub(crate) fn account_section(root: &Root, cx: &mut Context<Root>) -> AnyElement
                 .gap(px(2.0))
                 .child(
                     div()
+                        .id("account-name")
                         .whitespace_nowrap()
                         .text_size(theme::Text::Small.size())
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme::text())
+                        .when(!logged_in, |this| {
+                            this.cursor_pointer()
+                                .text_color(theme::accent())
+                                .hover(|style| style.text_color(theme::text()))
+                                .on_click(cx.listener(|root, _event: &ClickEvent, _window, cx| {
+                                    root.login_modal_open = true;
+                                    root.start_login(cx);
+                                }))
+                        })
                         .child(if logged_in {
                             match &root.account {
                                 Some(info) if !info.nickname.is_empty() => info.nickname.clone(),
@@ -402,34 +412,6 @@ pub(crate) fn account_section(root: &Root, cx: &mut Context<Root>) -> AnyElement
                     })
                     .on_click(cx.listener(|root, _event: &ClickEvent, _window, cx| {
                         root.logout(cx);
-                    }))
-                    .child(
-                        svg()
-                            .path(icons::path("x"))
-                            .size(px(theme::ICON_SM))
-                            .text_color(theme::text_muted()),
-                    ),
-            )
-        })
-        .when(!logged_in, |this| {
-            this.child(
-                div()
-                    .id("go-login")
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(28.0))
-                    .rounded_full()
-                    .cursor_pointer()
-                    .hover(|style| {
-                        style
-                            .bg(theme::surface_selected())
-                            .text_color(theme::text())
-                    })
-                    .on_click(cx.listener(|root, _event: &ClickEvent, _window, cx| {
-                        root.login_modal_open = true;
-                        root.start_login(cx);
                     }))
                     .child(
                         svg()

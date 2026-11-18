@@ -504,7 +504,6 @@ fn window_controls_section(root: &Root, cx: &mut Context<Root>) -> Option<AnyEle
             .py(px(theme::space::SM))
             .rounded(px(theme::radius::ROW))
             .cursor_pointer()
-            .hover(|style| style.bg(theme::surface_hover()))
             .on_click(cx.listener(move |root, _event: &ClickEvent, _window, cx| {
                 root.settings.titlebar = mode.key().to_string();
                 if let Err(err) = root.settings.save() {
@@ -979,7 +978,6 @@ fn theme_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
             .py(px(theme::space::SM))
             .rounded(px(theme::radius::ROW))
             .cursor_pointer()
-            .hover(|style| style.bg(theme::surface_hover()))
             .on_click(
                 cx.listener(move |root, _event: &ClickEvent, _window, cx| match value {
                     None => root.set_ui_theme_system(cx),
@@ -1064,7 +1062,6 @@ fn language_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
             .py(px(theme::space::SM))
             .rounded(px(theme::radius::ROW))
             .cursor_pointer()
-            .hover(|style| style.bg(theme::surface_hover()))
             .on_click(cx.listener(move |root, _event: &ClickEvent, _window, cx| {
                 match value {
                     Language::System => {
@@ -1223,7 +1220,6 @@ fn quality_page(root: &Root, cx: &mut Context<Root>) -> AnyElement {
                 .py(px(theme::space::SM))
                 .rounded(px(theme::radius::ROW))
                 .cursor_pointer()
-                .hover(|style| style.bg(theme::surface_hover()))
                 .on_click(cx.listener(move |root, _event: &ClickEvent, _window, cx| {
                     root.set_quality(&value, cx);
                     cx.notify();

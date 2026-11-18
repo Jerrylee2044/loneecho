@@ -339,7 +339,8 @@ pub(crate) fn account_section(root: &Root, cx: &mut Context<Root>) -> AnyElement
         .and_then(|url| root.cover_of(&url));
 
     // 侧栏底部账号条：不带卡片外壳。头像 + 昵称一行，退出登录为纯图标按钮；
-    // 不显示用户 ID，昵称不截断（nowrap 单行，极端长度自然溢出也不省略）。
+    // 不显示用户 ID，昵称不截断（nowrap 单行）。
+    // 昵称列与退出按钮放在 items_start 容器里，按钮顶边与昵称文字顶边严格对齐。
     div()
         .flex()
         .flex_row()
@@ -354,75 +355,86 @@ pub(crate) fn account_section(root: &Root, cx: &mut Context<Root>) -> AnyElement
         .child(
             div()
                 .flex()
-                .flex_col()
+                .flex_row()
+                .items_start()
+                .gap(px(theme::space::SM))
                 .flex_1()
                 .min_w(px(0.0))
-                .gap(px(2.0))
                 .child(
                     div()
-                        .id("account-name")
-                        .whitespace_nowrap()
-                        .text_size(theme::Text::Small.size())
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme::text())
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .id("account-name")
+                                .whitespace_nowrap()
+                                .text_size(theme::Text::Small.size())
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(theme::text())
+                                .when(!logged_in, |this| {
+                                    this.cursor_pointer()
+                                        .text_color(theme::accent())
+                                        .hover(|style| style.text_color(theme::text()))
+                                        .on_click(cx.listener(
+                                            |root, _event: &ClickEvent, _window, cx| {
+                                                root.login_modal_open = true;
+                                                root.start_login(cx);
+                                            },
+                                        ))
+                                })
+                                .child(if logged_in {
+                                    match &root.account {
+                                        Some(info) if !info.nickname.is_empty() => {
+                                            info.nickname.clone()
+                                        }
+                                        _ => root.tr("已登录").to_string(),
+                                    }
+                                } else {
+                                    root.tr("未登录").to_string()
+                                }),
+                        )
                         .when(!logged_in, |this| {
-                            this.cursor_pointer()
-                                .text_color(theme::accent())
-                                .hover(|style| style.text_color(theme::text()))
-                                .on_click(cx.listener(|root, _event: &ClickEvent, _window, cx| {
-                                    root.login_modal_open = true;
-                                    root.start_login(cx);
-                                }))
-                        })
-                        .child(if logged_in {
-                            match &root.account {
-                                Some(info) if !info.nickname.is_empty() => info.nickname.clone(),
-                                _ => root.tr("已登录").to_string(),
-                            }
-                        } else {
-                            root.tr("未登录").to_string()
+                            this.child(
+                                div()
+                                    .truncate()
+                                    .text_size(theme::Text::Tiny.size())
+                                    .text_color(theme::text_muted())
+                                    .child(root.tr("登录后才能使用搜索、歌单与播放")),
+                            )
                         }),
                 )
-                .when(!logged_in, |this| {
+                .when(logged_in, |this| {
                     this.child(
                         div()
-                            .truncate()
-                            .text_size(theme::Text::Tiny.size())
+                            .id("logout")
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(28.0))
+                            .rounded_full()
+                            .cursor_pointer()
                             .text_color(theme::text_muted())
-                            .child(root.tr("登录后才能使用搜索、歌单与播放")),
+                            .hover(|style| {
+                                style
+                                    .bg(theme::surface_selected())
+                                    .text_color(theme::text())
+                            })
+                            .on_click(cx.listener(|root, _event: &ClickEvent, _window, cx| {
+                                root.logout(cx);
+                            }))
+                            .child(
+                                svg()
+                                    .path(icons::path("log-in"))
+                                    .size(px(theme::ICON_SM))
+                                    .text_color(theme::text_muted()),
+                            ),
                     )
                 }),
         )
-        .when(logged_in, |this| {
-            this.child(
-                div()
-                    .id("logout")
-                    .flex_none()
-                    // 行整体垂直居中, 但圆形按钮视觉偏上: 下移与昵称文字顶对齐
-                    .mt(px(3.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(28.0))
-                    .rounded_full()
-                    .cursor_pointer()
-                    .text_color(theme::text_muted())
-                    .hover(|style| {
-                        style
-                            .bg(theme::surface_selected())
-                            .text_color(theme::text())
-                    })
-                    .on_click(cx.listener(|root, _event: &ClickEvent, _window, cx| {
-                        root.logout(cx);
-                    }))
-                    .child(
-                        svg()
-                            .path(icons::path("log-in"))
-                            .size(px(theme::ICON_SM))
-                            .text_color(theme::text_muted()),
-                    ),
-            )
-        })
         .into_any_element()
 }
 

@@ -391,8 +391,8 @@ pub struct Root {
     pub progress_track_bounds: Arc<Mutex<Option<gpui::Bounds<gpui::Pixels>>>>,
     /// 音量轨道在窗口里的位置（画布测量，鼠标事件据此换算音量）。
     pub volume_track_bounds: Arc<Mutex<Option<gpui::Bounds<gpui::Pixels>>>>,
-    /// 音效 EQ 三条滑杆（低音/中音/高音）的轨道位置，画布测量。
-    pub eq_track_bounds: [Arc<Mutex<Option<gpui::Bounds<gpui::Pixels>>>>; 3],
+    /// 音效 EQ 滑杆（10 段 + 前级 + 混响×2）的轨道位置，画布测量。
+    pub eq_track_bounds: [Arc<Mutex<Option<gpui::Bounds<gpui::Pixels>>>>; 13],
     /// 打开中的歌单（点卡片后展示曲目）。
     pub open_playlist: Option<(String, String, Arc<Vec<TrackItem>>)>,
     pub loading_playlist: bool,
@@ -708,7 +708,7 @@ impl Root {
             ),
             progress_track_bounds: Arc::new(Mutex::new(None)),
             volume_track_bounds: Arc::new(Mutex::new(None)),
-            eq_track_bounds: [(); 3].map(|_| Arc::new(Mutex::new(None))),
+            eq_track_bounds: [(); 13].map(|_| Arc::new(Mutex::new(None))),
             prefetch_inflight: HashSet::new(),
             prefetch_cooldown_since: HashMap::new(),
             prefetch_patrol: 0,

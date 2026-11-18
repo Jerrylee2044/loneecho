@@ -582,19 +582,34 @@ impl Language {
                 "Queue is empty. Search or open a playlist."
             }
             "LoneEcho" => "LoneEcho",
-            "音效（EQ）" => "Equalizer",
+            "音效" => "Sound Effects",
             "正值增强、负值减弱；立即生效并随配置保存" => {
                 "Positive values boost, negative values cut. Applied instantly and saved."
+            }
+            "前级" => "Preamp",
+            "空间混响" => "Reverb",
+            "混响强度" => "Wet",
+            "空间大小" => "Room size",
+            "混响强度为 0 时无混响；现场/古典等预设自带混响" => {
+                "0% means no reverb. Live/Classical presets include reverb."
             }
             "低音" => "Bass",
             "中音" => "Mid",
             "高音" => "Treble",
-            "开启音效" => "Enable EQ",
-            "关闭音效" => "Disable EQ",
+            "开启音效" => "Enable FX",
+            "关闭音效" => "Disable FX",
             "原声" => "Flat",
             "低音增强" => "Bass Boost",
+            "重低音" => "Extra Bass",
             "流行" => "Pop",
+            "摇滚" => "Rock",
+            "电子" => "Electronic",
+            "爵士" => "Jazz",
+            "古典" => "Classical",
             "清晰人声" => "Vocal",
+            "现场" => "Live",
+            "明亮" => "Bright",
+            "柔和" => "Soft",
             "正在搜索…" => "Searching…",
             "从队列移除" => "Remove from Queue",
             "这首歌暂时没有歌词" => "No lyrics for this track",

@@ -35,14 +35,18 @@ pub(crate) fn duration_of(seconds: i64) -> String {
     }
 }
 
-/// 音效 EQ 滑杆轨道宽度与滑块直径（设置页用，比播放条的音量条宽）。
-const EQ_TRACK_W: f32 = 220.0;
+/// 音效滑杆轨道宽度与滑块直径（设置页用）。
+const EQ_TRACK_W: f32 = 200.0;
 const EQ_THUMB: f32 = 11.0;
+/// 滑杆槽位约定：0..10 = EQ 段（dB），10 = 前级（dB），11/12 = 混响强度/空间大小（%）。
+const PREAMP_SLOT: usize = 10;
+const REVERB_WET_SLOT: usize = 11;
+const REVERB_ROOM_SLOT: usize = 12;
 
-/// 设置页 → 音效 EQ：总开关 + 预设 + 低音/中音/高音三段滑杆（±12 dB）。
+/// 设置页 → 音效：总开关 + 12 个预设 + 前级 + 10 段均衡器（双列）+ 空间混响。
 ///
 /// 滑杆交互复用播放条音量条的「canvas 测轨道位置 + 点/拖换算」做法；
-/// 松手即写配置，音频线程在下一帧边界应用，当前播放不中断。
+/// 拖动即写配置，音频线程在下一帧边界应用，当前播放不中断。
 fn eq_section(root: &Root, cx: &mut Context<Root>) -> AnyElement {
     let eq = root.settings.eq;
     let toggle_label = if eq.enabled {
@@ -50,17 +54,12 @@ fn eq_section(root: &Root, cx: &mut Context<Root>) -> AnyElement {
     } else {
         root.tr("开启音效")
     };
-    let presets = [
-        (root.tr("原声"), EqGains::preset_flat()),
-        (root.tr("低音增强"), EqGains::preset_bass_boost()),
-        (root.tr("流行"), EqGains::preset_pop()),
-        (root.tr("清晰人声"), EqGains::preset_vocal()),
-    ];
-    let preset_pills = presets
-        .into_iter()
+    let preset_pills = EqGains::PRESETS
+        .iter()
         .enumerate()
-        .map(|(index, (label, preset))| {
-            let chosen = eq == preset;
+        .map(|(index, (key, preset))| {
+            let label = root.tr(key);
+            let chosen = eq == *preset;
             div()
                 .id(("eq-preset", index))
                 .h(px(theme::size::CONTROL_SM))
@@ -79,10 +78,23 @@ fn eq_section(root: &Root, cx: &mut Context<Root>) -> AnyElement {
                 .text_size(theme::Text::Small.size())
                 .child(label)
                 .on_click(cx.listener(move |root, _event: &ClickEvent, _window, cx| {
-                    root.set_eq(preset, cx);
+                    root.set_eq(*preset, cx);
                 }))
         })
         .collect::<Vec<_>>();
+
+    // 频段双列排布：左列 32~500 Hz，右列 1K~16K，一行一对，节省纵向空间。
+    let mut band_rows: Vec<AnyElement> = Vec::new();
+    for row in 0..5 {
+        band_rows.push(
+            div()
+                .flex()
+                .gap(px(theme::space::LG))
+                .child(eq_slider_row(root, row, cx))
+                .child(eq_slider_row(root, row + 5, cx))
+                .into_any_element(),
+        );
+    }
 
     div()
         .flex()
@@ -93,7 +105,7 @@ fn eq_section(root: &Root, cx: &mut Context<Root>) -> AnyElement {
                 .text_size(theme::Text::Large.size())
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(theme::text())
-                .child(root.tr("音效（EQ）")),
+                .child(root.tr("音效")),
         )
         .child(
             div()
@@ -134,53 +146,79 @@ fn eq_section(root: &Root, cx: &mut Context<Root>) -> AnyElement {
                 )
                 .children(preset_pills),
         )
-        .children(
-            [
-                (0, root.tr("低音")),
-                (1, root.tr("中音")),
-                (2, root.tr("高音")),
-            ]
-            .into_iter()
-            .map(|(band, label)| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(theme::space::MD))
-                    .child(
-                        div()
-                            .w(px(48.0))
-                            .text_size(theme::Text::Small.size())
-                            .text_color(theme::text())
-                            .child(label),
-                    )
-                    .child(eq_slider(root, band, cx))
-                    .child(
-                        div()
-                            .w(px(56.0))
-                            .text_size(theme::Text::Small.size())
-                            .text_color(theme::text_muted())
-                            .child(format!("{:+.0} dB", eq_gain(root, band))),
-                    )
-            }),
+        .child(eq_slider_row(root, PREAMP_SLOT, cx))
+        .children(band_rows)
+        .child(
+            div()
+                .text_size(theme::Text::Small.size())
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme::text())
+                .child(root.tr("空间混响")),
+        )
+        .child(
+            div()
+                .text_size(theme::Text::Tiny.size())
+                .text_color(theme::text_faint())
+                .child(root.tr("混响强度为 0 时无混响；现场/古典等预设自带混响")),
+        )
+        .child(eq_slider_row(root, REVERB_WET_SLOT, cx))
+        .child(eq_slider_row(root, REVERB_ROOM_SLOT, cx))
+        .into_any_element()
+}
+
+/// 一行滑杆：标签（52px）+ 轨道 + 当前值（64px）。
+fn eq_slider_row(root: &Root, slot: usize, cx: &mut Context<Root>) -> AnyElement {
+    let (label, value_text) = match slot {
+        PREAMP_SLOT => (
+            root.tr("前级"),
+            format!("{:+.0} dB", root.settings.eq.preamp_db),
+        ),
+        REVERB_WET_SLOT => (
+            root.tr("混响强度"),
+            format!("{:.0}%", root.settings.eq.reverb_wet * 100.0),
+        ),
+        REVERB_ROOM_SLOT => (
+            root.tr("空间大小"),
+            format!("{:.0}%", root.settings.eq.reverb_room * 100.0),
+        ),
+        band => (
+            sodam_core::eq::BAND_LABELS[band],
+            format!("{:+.0} dB", root.settings.eq.bands[band]),
+        ),
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(px(theme::space::MD))
+        .child(
+            div()
+                .w(px(52.0))
+                .text_size(theme::Text::Small.size())
+                .text_color(theme::text())
+                .child(label),
+        )
+        .child(eq_slider(root, slot, cx))
+        .child(
+            div()
+                .w(px(64.0))
+                .text_size(theme::Text::Small.size())
+                .text_color(theme::text_muted())
+                .child(value_text),
         )
         .into_any_element()
 }
 
-fn eq_gain(root: &Root, band: usize) -> f32 {
-    match band {
-        0 => root.settings.eq.bass,
-        1 => root.settings.eq.mid,
-        _ => root.settings.eq.treble,
-    }
-}
-
-/// 单段 EQ 滑杆：-12 dB（左端）～ +12 dB（右端），步进 1 dB。
-fn eq_slider(root: &Root, band: usize, cx: &mut Context<Root>) -> impl IntoElement {
-    let gain = eq_gain(root, band);
+/// 单个音效滑杆（dB 或百分比两类，槽位约定见 eq_section）。
+fn eq_slider(root: &Root, slot: usize, cx: &mut Context<Root>) -> impl IntoElement {
     let range = sodam_core::eq::EQ_GAIN_RANGE_DB;
-    let ratio = ((gain + range) / (2.0 * range)).clamp(0.0, 1.0);
+    let ratio = match slot {
+        PREAMP_SLOT => ((root.settings.eq.preamp_db + range) / (2.0 * range)).clamp(0.0, 1.0),
+        REVERB_WET_SLOT => root.settings.eq.reverb_wet.clamp(0.0, 1.0),
+        REVERB_ROOM_SLOT => root.settings.eq.reverb_room.clamp(0.0, 1.0),
+        band => ((root.settings.eq.bands[band] + range) / (2.0 * range)).clamp(0.0, 1.0),
+    };
     let filled = (EQ_TRACK_W - EQ_THUMB) * ratio;
-    let bounds_slot = root.eq_track_bounds[band].clone();
+    let bounds_slot = root.eq_track_bounds[slot].clone();
     let apply = move |x: f32, root: &mut Root, cx: &mut Context<Root>| {
         let left = bounds_slot
             .lock()
@@ -188,18 +226,18 @@ fn eq_slider(root: &Root, band: usize, cx: &mut Context<Root>) -> impl IntoEleme
             .and_then(|value| value.map(|rect| f32::from(rect.left())))
             .unwrap_or(0.0);
         let ratio = ((x - left) / EQ_TRACK_W).clamp(0.0, 1.0);
-        let db = (ratio * 2.0 * range - range).round();
         let mut next = root.settings.eq;
-        match band {
-            0 => next.bass = db,
-            1 => next.mid = db,
-            _ => next.treble = db,
+        match slot {
+            PREAMP_SLOT => next.preamp_db = (ratio * 2.0 * range - range).round(),
+            REVERB_WET_SLOT => next.reverb_wet = (ratio * 20.0).round() / 20.0,
+            REVERB_ROOM_SLOT => next.reverb_room = (ratio * 20.0).round() / 20.0,
+            band => next.bands[band] = (ratio * 2.0 * range - range).round(),
         }
         root.set_eq(next, cx);
     };
     let apply_down = apply.clone();
     let apply_move = apply.clone();
-    let slot_for_canvas = root.eq_track_bounds[band].clone();
+    let bounds_for_canvas = root.eq_track_bounds[slot].clone();
 
     div()
         .relative()
@@ -240,7 +278,7 @@ fn eq_slider(root: &Root, band: usize, cx: &mut Context<Root>) -> impl IntoEleme
         .child(
             canvas(
                 move |bounds: Bounds<gpui::Pixels>, _window, _cx| {
-                    if let Ok(mut guard) = slot_for_canvas.lock() {
+                    if let Ok(mut guard) = bounds_for_canvas.lock() {
                         *guard = Some(bounds);
                     }
                 },
@@ -251,7 +289,7 @@ fn eq_slider(root: &Root, band: usize, cx: &mut Context<Root>) -> impl IntoEleme
         )
         .child(
             div()
-                .id(("eq-track", band))
+                .id(("eq-track", slot))
                 .absolute()
                 .size_full()
                 .cursor_pointer()

@@ -886,40 +886,31 @@ pub(crate) fn settings_view(root: &mut Root, cx: &mut Context<Root>) -> AnyEleme
         .into_any_element()
 }
 
-/// 中栏：「设置」卡片 + 二级分类菜单，选中项用强调色高亮。
+/// 中栏：二级分类菜单。纯文字列表——无卡片外壳、无选中高亮块，
+/// 选中项只用强调色文字表示；菜单文字与上方「设置」标题左对齐。
 fn settings_menu(root: &Root, cx: &mut Context<Root>) -> AnyElement {
     div()
         .w(px(230.0))
         .flex_none()
-        .h_full()
         .flex()
         .flex_col()
         .gap(px(theme::space::XS))
-        .p(px(theme::space::MD))
-        .rounded(px(theme::radius::CARD))
-        .bg(theme::surface_elevated())
-        .border_1()
-        .border_color(theme::border())
         .children(SettingsSection::all().iter().map(|section| {
             let selected = *section == root.settings_section;
             div()
                 .id(gpui::ElementId::Name(
                     format!("settings-menu-{}", section.id()).into(),
                 ))
-                .px(px(theme::space::MD))
                 .py(px(theme::space::SM))
-                .rounded(px(theme::radius::ROW))
                 .cursor_pointer()
-                .when(selected, |this| this.bg(theme::accent()))
-                .when(!selected, |this| {
-                    this.hover(|style| style.bg(theme::surface_hover()))
-                })
+                .rounded(px(theme::radius::ROW))
                 .text_size(theme::Text::Body.size())
                 .text_color(if selected {
-                    theme::accent_foreground()
+                    theme::accent()
                 } else {
                     theme::text()
                 })
+                .hover(|style| style.bg(theme::surface_hover()))
                 .child(root.tr(section.label_key()))
                 .on_click(cx.listener(move |root, _event: &ClickEvent, _window, cx| {
                     root.set_settings_section(*section, cx);

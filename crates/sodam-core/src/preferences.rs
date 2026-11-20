@@ -11,6 +11,9 @@ pub struct PlaybackPreferences {
     volume: f32,
     volume_before_mute: f32,
     audio_cache_limit_mb: u64,
+    /// LoneEcho fork: 音效 EQ 也在滑杆防抖里持久化 (上游白名单没有它,
+    /// 导致改动不落盘, 反被配置热重载用磁盘旧值顶回界面)。
+    eq: crate::eq::EqGains,
 }
 
 impl From<&Settings> for PlaybackPreferences {
@@ -19,6 +22,7 @@ impl From<&Settings> for PlaybackPreferences {
             volume: settings.volume,
             volume_before_mute: settings.volume_before_mute,
             audio_cache_limit_mb: settings.audio_cache_limit_mb,
+            eq: settings.eq,
         }
     }
 }
@@ -38,6 +42,7 @@ impl PlaybackPreferences {
         settings.volume = self.volume;
         settings.volume_before_mute = self.volume_before_mute;
         settings.audio_cache_limit_mb = self.audio_cache_limit_mb;
+        settings.eq = self.eq;
         settings.normalize_playback();
         settings.save_to_locked(path)
     }
